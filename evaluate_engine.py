@@ -16,143 +16,127 @@ Theoretical Foundations:
   NDCG = DCG / Ideal DCG
 """
 
+# Suppress verbose TF INFO logs
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
 import time
 import numpy as np
 from hybrid_search import ArtGallerySearchEngine
 
 
-def calculate_mrr(ranked_items, target_item):
-    """
-    Computes the Reciprocal Rank for a single known-item query.
-
-    Parameters:
-        ranked_items (list): An ordered list of retrieved document identifiers.
-        target_item (str): The exact document identifier that satisfies the query.
-
-    Returns:
-        float: 1.0 / rank if the target is found, otherwise 0.0.
-    """
+def calculate_mrr(ranked_ids, target_id):
+    """Computes Reciprocal Rank (1/rank) for the first relevant document."""
     try:
-        rank = ranked_items.index(target_item) + 1
-        return 1.0 / rank
+        return 1.0 / (ranked_ids.index(target_id) + 1)
     except ValueError:
         return 0.0
 
 
-def calculate_ndcg(ranked_items, relevant_items, k=10):
-    """
-    Computes the Normalized Discounted Cumulative Gain at rank K (NDCG@K).
+def calculate_ndcg(ranked_ids, relevant_ids, k=10):
+    """Computes NDCG@K using binary relevance."""
+    dcg = sum(
+        [
+            1.0 / np.log2(i + 2)
+            for i, doc_id in enumerate(ranked_ids[:k])
+            if doc_id in relevant_ids
+        ]
+    )
+    ideal_count = min(len(relevant_ids), k)
+    idcg = sum([1.0 / np.log2(i + 2) for i in range(ideal_count)])
+    return dcg / idcg if idcg > 0 else 0.0
 
-    Parameters:
-        ranked_items (list): An ordered list of retrieved document identifiers.
-        relevant_items (list): A collection of document identifiers deemed relevant to the query.
-        k (int): The cutoff rank threshold for the evaluation.
 
-    Returns:
-        float: The NDCG@K score bounded between 0.0 and 1.0.
-    """
-    dcg = 0.0
-    idcg = 0.0
+def resolve_titles_to_ids(df, titles):
+    """Maps normalized titles to unique document IDs for stable evaluation."""
+    if isinstance(titles, str):
+        titles = [titles]
 
-    for i, doc_id in enumerate(ranked_items[:k]):
-        if doc_id in relevant_items:
-            rel_score = 1.0
-            dcg += rel_score / np.log2(i + 2)
+    # Normalize titles in the dataframe and the input list
+    df["title_normalized"] = df["title"].str.lower()
+    normalized_titles = [t.lower() for t in titles]
 
-    ideal_relevant_count = min(len(relevant_items), k)
-    for i in range(ideal_relevant_count):
-        idcg += 1.0 / np.log2(i + 2)
-
-    if idcg == 0.0:
-        return 0.0
-
-    return dcg / idcg
+    return df[df["title_normalized"].isin(normalized_titles)]["id"].unique().tolist()
 
 
 if __name__ == "__main__":
-    print("\n============================================================")
+    print("\n" + "=" * 60)
     print("INITIALIZING SYSTEM EVALUATION PIPELINE")
-    print("============================================================")
+    print("=" * 60)
 
     engine = ArtGallerySearchEngine("art_gallery_data.csv")
 
+    # Engine Warm-up: Eliminates first-call latency spikes from BERT initialization
+    _ = engine.hybrid_search("warm up", top_k=1)
+
+    # Ground Truth Definitions
     known_item_qrels = {
-        "A Steamer off the Coast": "A Steamer off the Coast",
-        "Matisse Reclining Nude": "Reclining Nude II",
-        "Wyndham Tryon Fraga": "Fraga",
+        "a steamer off the coast": "a steamer off the coast",
+        "matisse reclining nude": "reclining nude ii",
+        "wyndham tryon fraga": "fraga",
     }
 
     semantic_qrels = {
         "a gloomy landscape with swirling clouds": [
-            "Clouds",
-            "?A Curtained Bed, with a Figure or Figures Reclining",
-            "Landscape with a Peasant on a Path",
+            "clouds",
+            "?a curtained bed, with a figure or figures reclining",
+            "landscape with a peasant on a path",
         ],
         "a portrait of a woman": [
-            "Portrait of a Woman",
-            "Head of a Woman",
-            "Seated Woman",
+            "portrait of a woman",
+            "head of a woman",
+            "seated woman",
         ],
     }
 
-    print("\n--- Phase 1: Evaluating Known-Item Retrieval (MRR) ---")
-    mrr_scores = []
-    mrr_latencies = []
+    mrr_scores, ndcg_scores, latencies = [], [], []
 
+    print("\n--- Phase 1: Known-Item Retrieval (MRR) ---")
     for query, target_title in known_item_qrels.items():
-        start_time = time.perf_counter()
+        # Resolve target title to ID for strict matching
+        resolved = resolve_titles_to_ids(engine.df, target_title)
+        if not resolved:
+            print(f"[WARNING] Target '{target_title}' not found in corpus. Skipping.")
+            continue
+        target_id = resolved[0]
+
+        start = time.perf_counter()
         raw_results = engine.hybrid_search(query, top_k=20)
-        query_latency = time.perf_counter() - start_time
-        mrr_latencies.append(query_latency)
+        qlat = time.perf_counter() - start
 
-        retrieved_titles = [res["Title"] for res in raw_results]
+        latencies.append(qlat)
+        retrieved_ids = [res["id"] for res in raw_results if "id" in res]
 
-        score = calculate_mrr(retrieved_titles, target_title)
+        score = calculate_mrr(retrieved_ids, target_id)
         mrr_scores.append(score)
+        print(f"Query: '{query}' ({qlat:.4f}s) | MRR: {score:.4f}")
 
-        if target_title in retrieved_titles:
-            rank_found = retrieved_titles.index(target_title) + 1
-        else:
-            rank_found = "Not Found (Top 20)"
+    print("\n--- Phase 2: Semantic Retrieval (NDCG@10) ---")
+    for query, rel_titles in semantic_qrels.items():
+        relevant_ids = resolve_titles_to_ids(engine.df, rel_titles)
 
-        print(f"Query: '{query}' ({query_latency:.4f} seconds)")
-        print(f"  -> Target: '{target_title}'")
-        print(f"  -> Rank Found: {rank_found}")
-        print(f"  -> Reciprocal Rank: {score:.4f}\n")
+        if not relevant_ids:
+            print(f"[WARNING] No relevant docs found for query '{query}'. Skipping.")
+            continue
 
-    mean_mrr = np.mean(mrr_scores) if mrr_scores else 0.0
-
-    print("--- Phase 2: Evaluating Semantic Retrieval (NDCG@10) ---")
-    ndcg_scores = []
-    ndcg_latencies = []
-
-    for query, relevant_titles in semantic_qrels.items():
-        start_time = time.perf_counter()
+        start = time.perf_counter()
         raw_results = engine.hybrid_search(query, top_k=10)
-        query_latency = time.perf_counter() - start_time
-        ndcg_latencies.append(query_latency)
+        qlat = time.perf_counter() - start
 
-        retrieved_titles = [res["Title"] for res in raw_results]
+        latencies.append(qlat)
+        retrieved_ids = [res["id"] for res in raw_results]
 
-        score = calculate_ndcg(retrieved_titles, relevant_titles, k=10)
+        score = calculate_ndcg(retrieved_ids, relevant_ids, k=10)
         ndcg_scores.append(score)
+        print(f"Query: '{query}' ({qlat:.4f}s) | NDCG@10: {score:.4f}")
 
-        items_retrieved = sum(1 for t in retrieved_titles if t in relevant_titles)
-
-        print(f"Query: '{query}' ({query_latency:.4f} seconds)")
-        print(f"  -> Expected Relevant Items: {len(relevant_titles)}")
-        print(f"  -> Items Retrieved in Top 10: {items_retrieved}")
-        print(f"  -> NDCG@10 Score: {score:.4f}\n")
-
-    mean_ndcg = np.mean(ndcg_scores) if ndcg_scores else 0.0
-
-    all_latencies = mrr_latencies + ndcg_latencies
-    mean_latency = np.mean(all_latencies) * 1000 if all_latencies else 0.0
-
-    print("============================================================")
+    # Metrics Aggregation
+    print("\n" + "=" * 60)
     print("OVERALL SYSTEM PERFORMANCE METRICS")
-    print("============================================================")
-    print(f"Mean Reciprocal Rank (MRR):                 {mean_mrr:.4f}")
-    print(f"Normalized Discounted Cumulative Gain @ 10: {mean_ndcg:.4f}")
-    print(f"Mean Query Latency:                         {mean_latency:.2f} ms")
-    print("============================================================")
+    print("=" * 60)
+    print(f"Mean Reciprocal Rank (MRR):                 {np.mean(mrr_scores):.4f}")
+    print(f"Mean NDCG@10:                               {np.mean(ndcg_scores):.4f}")
+    print(
+        f"Mean Query Latency:                         {np.mean(latencies) * 1000:.2f} ms"
+    )
+    print("=" * 60)

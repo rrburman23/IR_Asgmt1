@@ -5,6 +5,11 @@ Description: Implements a dual-pipeline retrieval system using BM25 for sparse
              semantic matching, fused via Reciprocal Rank Fusion (RRF).
 """
 
+# Suppress verbose TF INFO logs
+import os
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
 import time
 import pandas as pd
 import numpy as np
@@ -110,6 +115,7 @@ class ArtGallerySearchEngine:
             doc = self.df.iloc[idx]
             results.append(
                 {
+                    "id": doc["id"],
                     "Rank": rank + 1,
                     "Title": doc["title"],
                     "Artist": doc["artist"],

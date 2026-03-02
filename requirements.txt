@@ -1,4 +1,11 @@
-pandas==2.2.0
-numpy==1.26.3
-rank-bm25==0.2.2
-sentence-transformers==2.3.1
+# Data Processing and Networking
+pandas
+requests
+numpy
+
+# Information Retrieval (Lexical)
+rank_bm25
+
+# Natural Language Processing (Semantic)
+sentence-transformers
+torch
