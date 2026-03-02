@@ -1,7 +1,7 @@
 """
 File Name: Hybrid Search Engine core
-Description: Implements a dual-pipeline retrieval system using BM25 for sparse 
-             lexical matching and Exact k-NN (Sentence Transformers) for dense 
+Description: Implements a dual-pipeline retrieval system using BM25 for sparse
+             lexical matching and Exact k-NN (Sentence Transformers) for dense
              semantic matching, fused via Reciprocal Rank Fusion (RRF).
 """
 
@@ -10,29 +10,30 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
+
 class ArtGallerySearchEngine:
     def __init__(self, data_path):
         """
-        Initializes the search engine, loads the document store, 
+        Initializes the search engine, loads the document store,
         and triggers the offline indexing phase.
         """
         print("[INFO] Loading Document Store...")
         self.df = pd.read_csv(data_path)
         # Ensure text columns are strings to prevent tokenization errors
-        self.df['title'] = self.df['title'].fillna('').astype(str)
-        self.df['artist'] = self.df['artist'].fillna('').astype(str)
-        self.df['medium'] = self.df['medium'].fillna('').astype(str)
-        
+        self.df["title"] = self.df["title"].fillna("").astype(str)
+        self.df["artist"] = self.df["artist"].fillna("").astype(str)
+        self.df["medium"] = self.df["medium"].fillna("").astype(str)
+
         # Combine Title and Artist for the Exact-Match Sparse Index
-        self.sparse_corpus = (self.df['title'] + " " + self.df['artist']).tolist()
-        
+        self.sparse_corpus = (self.df["title"] + " " + self.df["artist"]).tolist()
+
         # Use Medium/Description for the Semantic Dense Index
-        self.dense_corpus = self.df['medium'].tolist()
-        
+        self.dense_corpus = self.df["medium"].tolist()
+
         self.bm25 = None
         self.dense_model = None
         self.document_embeddings = None
-        
+
         self._build_indexes()
 
     def _build_indexes(self):
@@ -43,12 +44,14 @@ class ArtGallerySearchEngine:
         # Tokenization: lowercasing and splitting by spaces
         tokenized_corpus = [doc.lower().split(" ") for doc in self.sparse_corpus]
         self.bm25 = BM25Okapi(tokenized_corpus)
-        
+
         print("[INFO] Building Dense Vector Index (BERT)...")
         # Using a lightweight, highly efficient pre-trained transformer
-        self.dense_model = SentenceTransformer('all-MiniLM-L6-v2')
+        self.dense_model = SentenceTransformer("all-MiniLM-L6-v2")
         # Generate dense embeddings for all descriptions
-        self.document_embeddings = self.dense_model.encode(self.dense_corpus, convert_to_numpy=True)
+        self.document_embeddings = self.dense_model.encode(
+            self.dense_corpus, convert_to_numpy=True
+        )
         print("[SUCCESS] All indexes built successfully.")
 
     def search_sparse(self, query, top_k=100):
@@ -66,11 +69,11 @@ class ArtGallerySearchEngine:
         Online Phase: Executes Exact k-NN cosine similarity on dense vectors.
         """
         query_embedding = self.dense_model.encode([query], convert_to_numpy=True)
-        
+
         # Compute exact cosine similarity via dot product (vectors are normalized)
         # This satisfies the Exact k-NN requirement justified in the report
         scores = np.dot(self.document_embeddings, query_embedding.T).flatten()
-        
+
         top_indices = np.argsort(scores)[::-1][:top_k]
         return {idx: rank for rank, idx in enumerate(top_indices)}
 
@@ -79,10 +82,10 @@ class ArtGallerySearchEngine:
         Online Phase: Orchestrates dual-retrieval and fuses results using RRF.
         """
         print(f"\n[QUERY] '{query}'")
-        
+
         sparse_ranks = self.search_sparse(query)
         dense_ranks = self.search_dense(query)
-        
+
         # Reciprocal Rank Fusion (RRF)
         rrf_scores = {}
         for idx in range(len(self.df)):
@@ -93,38 +96,59 @@ class ArtGallerySearchEngine:
                 score += 1.0 / (rrf_k + dense_ranks[idx])
             if score > 0:
                 rrf_scores[idx] = score
-                
+
         # Sort by fused score
         ranked_indices = sorted(rrf_scores, key=rrf_scores.get, reverse=True)[:top_k]
-        
+
         # Format the output
         results = []
         for rank, idx in enumerate(ranked_indices):
             doc = self.df.iloc[idx]
-            results.append({
-                "Rank": rank + 1,
-                "Title": doc['title'],
-                "Artist": doc['artist'],
-                "Description": doc['medium'],
-                "Score": round(rrf_scores[idx], 4)
-            })
+            results.append(
+                {
+                    "Rank": rank + 1,
+                    "Title": doc["title"],
+                    "Artist": doc["artist"],
+                    "Description": doc["medium"],
+                    "Score": round(rrf_scores[idx], 4),
+                }
+            )
         return results
 
+
 # ==========================================
-# Testing the Engine locally
+# Interactive Command Line Interface
 # ==========================================
 if __name__ == "__main__":
-    # Initialize the engine (Make sure art_gallery_data.csv is in the folder)
-    engine = ArtGallerySearchEngine("art_gallery_data.csv")
-    
-    # Test 1: Known-Item Search (Exact Keyword)
-    exact_results = engine.hybrid_search("Mona Lisa")
-    print("\n--- Exact Match Results ---")
-    for res in exact_results[:3]:
-        print(f"{res['Rank']}. {res['Title']} by {res['Artist']} (Score: {res['Score']})")
+    print("\n" + "=" * 50)
+    print("ART GALLERY SEARCH ENGINE INITIALIZING...")
+    print("=" * 50)
 
-    # Test 2: Semantic Search (Description/Concept)
-    semantic_results = engine.hybrid_search("a gloomy landscape with swirling clouds")
-    print("\n--- Semantic Results ---")
-    for res in semantic_results[:3]:
-        print(f"{res['Rank']}. {res['Title']} by {res['Artist']} - {res['Description'][:50]}... (Score: {res['Score']})")
+    # Initialize the engine
+    engine = ArtGallerySearchEngine("art_gallery_data.csv")
+    print("\n[READY] Type your query below. Type 'exit' or 'quit' to stop.")
+
+    while True:
+        user_query = input("\nEnter search query: ").strip()
+
+        if user_query.lower() in ["exit", "quit"]:
+            print("Shutting down search engine. Goodbye!")
+            break
+
+        if not user_query:
+            continue
+
+        # Run the search
+        results = engine.hybrid_search(user_query, top_k=5)
+
+        # Display results nicely
+        print("\n--- Top 5 Results ---")
+        for res in results:
+            # Safely truncate long descriptions for the terminal
+            desc = (
+                res["Description"][:75] + "..."
+                if len(res["Description"]) > 75
+                else res["Description"]
+            )
+            print(f"{res['Rank']}. {res['Title']} | Artist: {res['Artist']}")
+            print(f"   Score: {res['Score']} | Medium: {desc}\n")
