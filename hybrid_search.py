@@ -5,6 +5,7 @@ Description: Implements a dual-pipeline retrieval system using BM25 for sparse
              semantic matching, fused via Reciprocal Rank Fusion (RRF).
 """
 
+import time
 import pandas as pd
 import numpy as np
 from rank_bm25 import BM25Okapi
@@ -80,7 +81,10 @@ class ArtGallerySearchEngine:
     def hybrid_search(self, query, top_k=10, rrf_k=60):
         """
         Online Phase: Orchestrates dual-retrieval and fuses results using RRF.
+        Records and outputs execution latency.
         """
+        start_time = time.perf_counter()
+
         print(f"\n[QUERY] '{query}'")
 
         sparse_ranks = self.search_sparse(query)
@@ -113,6 +117,10 @@ class ArtGallerySearchEngine:
                     "Score": round(rrf_scores[idx], 4),
                 }
             )
+
+        latency = time.perf_counter() - start_time
+        print(f"[TIMING] Retrieval and fusion completed in {latency:.4f} seconds.")
+
         return results
 
 
@@ -132,19 +140,20 @@ if __name__ == "__main__":
         user_query = input("\nEnter search query: ").strip()
 
         if user_query.lower() in ["exit", "quit"]:
-            print("Shutting down search engine. Goodbye!")
+            print("Shutting down search engine.")
             break
 
         if not user_query:
             continue
 
-        # Run the search
+        # Execute search and capture end-to-end interface latency
+        cli_start_time = time.perf_counter()
         results = engine.hybrid_search(user_query, top_k=5)
+        cli_latency = time.perf_counter() - cli_start_time
 
-        # Display results nicely
-        print("\n--- Top 5 Results ---")
+        # Display results utilizing standard search engine formatting
+        print(f"\n--- Top {len(results)} Results ({cli_latency:.4f} seconds) ---")
         for res in results:
-            # Safely truncate long descriptions for the terminal
             desc = (
                 res["Description"][:75] + "..."
                 if len(res["Description"]) > 75
