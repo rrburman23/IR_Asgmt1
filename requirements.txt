@@ -1,0 +1,4 @@
+pandas==2.2.0
+numpy==1.26.3
+rank-bm25==0.2.2
+sentence-transformers==2.3.1
