@@ -18,10 +18,12 @@ Theoretical Foundations:
 
 # Suppress verbose TF INFO logs
 import os
+
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 import time
 import numpy as np
+import pandas as pd
 from hybrid_search import ArtGallerySearchEngine
 
 
@@ -52,21 +54,32 @@ def resolve_titles_to_ids(df, titles):
     if isinstance(titles, str):
         titles = [titles]
 
-    # Normalize titles in the dataframe and the input list
-    df["title_normalized"] = df["title"].str.lower()
+    # Use a temporary copy to avoid SettingWithCopyWarning on the original engine DF
+    temp_df = df.copy()
+    temp_df["title_normalized"] = temp_df["title"].str.lower()
     normalized_titles = [t.lower() for t in titles]
 
-    return df[df["title_normalized"].isin(normalized_titles)]["id"].unique().tolist()
+    return (
+        temp_df[temp_df["title_normalized"].isin(normalized_titles)]["id"]
+        .unique()
+        .tolist()
+    )
 
 
-if __name__ == "__main__":
+def run_evaluation(data_path="art_gallery_data.csv"):
+    """Primary entry point for executing the evaluation suite."""
     print("\n" + "=" * 60)
     print("INITIALIZING SYSTEM EVALUATION PIPELINE")
     print("=" * 60)
 
-    engine = ArtGallerySearchEngine("art_gallery_data.csv")
+    # Initialize Engine
+    try:
+        engine = ArtGallerySearchEngine(data_path)
+    except Exception as e:
+        print(f"[ERROR] Could not initialize engine: {e}")
+        return
 
-    # Engine Warm-up: Eliminates first-call latency spikes from BERT initialization
+    # Engine Warm-up: Eliminates first-call latency spikes
     _ = engine.hybrid_search("warm up", top_k=1)
 
     # Ground Truth Definitions
@@ -93,11 +106,11 @@ if __name__ == "__main__":
 
     print("\n--- Phase 1: Known-Item Retrieval (MRR) ---")
     for query, target_title in known_item_qrels.items():
-        # Resolve target title to ID for strict matching
         resolved = resolve_titles_to_ids(engine.df, target_title)
         if not resolved:
             print(f"[WARNING] Target '{target_title}' not found in corpus. Skipping.")
             continue
+
         target_id = resolved[0]
 
         start = time.perf_counter()
@@ -109,7 +122,9 @@ if __name__ == "__main__":
 
         score = calculate_mrr(retrieved_ids, target_id)
         mrr_scores.append(score)
-        print(f"Query: '{query}' ({qlat:.4f}s) | MRR: {score:.4f}")
+        print(
+            f"Query: '{query:<30}' | Latency: {qlat * 1000:6.2f}ms | MRR: {score:.4f}"
+        )
 
     print("\n--- Phase 2: Semantic Retrieval (NDCG@10) ---")
     for query, rel_titles in semantic_qrels.items():
@@ -128,15 +143,24 @@ if __name__ == "__main__":
 
         score = calculate_ndcg(retrieved_ids, relevant_ids, k=10)
         ndcg_scores.append(score)
-        print(f"Query: '{query}' ({qlat:.4f}s) | NDCG@10: {score:.4f}")
+        print(
+            f"Query: '{query:<30}' | Latency: {qlat * 1000:6.2f}ms | NDCG@10: {score:.4f}"
+        )
 
     # Metrics Aggregation
     print("\n" + "=" * 60)
     print("OVERALL SYSTEM PERFORMANCE METRICS")
     print("=" * 60)
-    print(f"Mean Reciprocal Rank (MRR):                 {np.mean(mrr_scores):.4f}")
-    print(f"Mean NDCG@10:                               {np.mean(ndcg_scores):.4f}")
-    print(
-        f"Mean Query Latency:                         {np.mean(latencies) * 1000:.2f} ms"
-    )
-    print("=" * 60)
+    if mrr_scores:
+        print(f"Mean Reciprocal Rank (MRR):                 {np.mean(mrr_scores):.4f}")
+    if ndcg_scores:
+        print(f"Mean NDCG@10:                               {np.mean(ndcg_scores):.4f}")
+    if latencies:
+        print(
+            f"Mean Query Latency:                         {np.mean(latencies) * 1000:.2f} ms"
+        )
+    print("=" * 60 + "\n")
+
+
+if __name__ == "__main__":
+    run_evaluation()

@@ -19,6 +19,7 @@ from ingest_data import (
     OUTPUT_FILE,
 )
 from hybrid_search import ArtGallerySearchEngine
+from evaluate_engine import run_evaluation
 
 
 def bootstrap_system():
@@ -57,7 +58,7 @@ def run_interactive_session(engine):
     print("\n" + "-" * 60)
     print("SEARCH INTERFACE READY")
     print(
-        "Type 'exit' to quit. Type 'evaluate' to run metrics (requires evaluate_engine.py)."
+        "Type '/exit' to quit. Type '/evaluate' to run metrics (requires evaluate_engine.py)."
     )
     print("-" * 60)
 
@@ -65,16 +66,16 @@ def run_interactive_session(engine):
         query = input("\nEnter search query: ")
         query = " ".join(query.split())
 
-        if query.lower() in ["exit", "quit"]:
+        if query.lower() in ["/exit", "/quit"]:
             print("[INFO] Shutting down engine...")
             break
 
         if not query:
             continue
 
-        # Option to trigger evaluation from main if you choose to import it
-        if query.lower() == "evaluate":
-            print("[INFO] Please run 'python evaluate_engine.py' for the full report.")
+        # Option to trigger evaluation from main
+        if query.lower() == "/evaluate":
+            run_evaluation()
             continue
 
         results = engine.hybrid_search(query, top_k=5)
