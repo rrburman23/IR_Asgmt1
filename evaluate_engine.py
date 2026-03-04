@@ -16,15 +16,14 @@ Theoretical Foundations:
   NDCG = DCG / Ideal DCG
 """
 
-# Suppress verbose TF INFO logs
 import os
-
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
 import time
 import numpy as np
-import pandas as pd
+
 from hybrid_search import ArtGallerySearchEngine
+
+# Suppress verbose TF INFO logs
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 
 def calculate_mrr(ranked_ids, target_id):
@@ -75,7 +74,7 @@ def run_evaluation(data_path="art_gallery_data.csv"):
     # Initialize Engine
     try:
         engine = ArtGallerySearchEngine(data_path)
-    except Exception as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"[ERROR] Could not initialize engine: {e}")
         return
 

@@ -4,10 +4,11 @@ Description: Automates the acquisition of the Tate Gallery metadata,
              standardizes/normalizes text, and filters the corpus.
 """
 
-import pandas as pd
-import requests
 import os
 import re
+
+import pandas as pd
+import requests
 
 DATA_URL = "https://github.com/tategallery/collection/raw/master/artwork_data.csv"
 RAW_FILE = "raw_tate_data.csv"
@@ -37,7 +38,7 @@ def download_dataset(url, filename, timeout=30):
         print("[SUCCESS] Dataset downloaded successfully.")
 
     except requests.exceptions.RequestException as e:
-        raise ConnectionError(f"Network error during download: {e}")
+        raise ConnectionError(f"Network error during download: {e}") from e
 
 
 def normalize_text(text):
@@ -133,5 +134,10 @@ if __name__ == "__main__":
         download_dataset(DATA_URL, RAW_FILE)
         process_and_filter(RAW_FILE, OUTPUT_FILE)
 
-    except Exception as e:
+    except (
+        ConnectionError,
+        FileNotFoundError,
+        KeyError,
+        pd.errors.EmptyDataError,
+    ) as e:
         print(f"[ERROR] Ingestion pipeline failed: {e}")

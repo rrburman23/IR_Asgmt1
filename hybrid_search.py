@@ -5,19 +5,25 @@ Description: Implements a dual-pipeline retrieval system using BM25 for sparse
              semantic matching, fused via Reciprocal Rank Fusion (RRF).
 """
 
-# Suppress verbose TF INFO logs
 import os
-
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
 import time
 import pandas as pd
 import numpy as np
+
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
+# Suppress verbose TF INFO logs
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
 
 class ArtGallerySearchEngine:
+    """
+    Core engine for the Art Gallery Hybrid Search.
+    Manages data ingestion, offline index construction (sparse and dense),
+    and online query execution utilizing Reciprocal Rank Fusion (RRF).
+    """
+
     def __init__(self, data_path):
         """
         Initializes the search engine, loads the document store,
@@ -133,7 +139,8 @@ class ArtGallerySearchEngine:
 # ==========================================
 # Interactive Command Line Interface
 # ==========================================
-if __name__ == "__main__":
+def run_cli():
+    """Runs the interactive Command Line Interface for the search engine."""
     print("\n" + "=" * 50)
     print("ART GALLERY SEARCH ENGINE INITIALIZING...")
     print("=" * 50)
@@ -167,3 +174,6 @@ if __name__ == "__main__":
             )
             print(f"{res['Rank']}. {res['Title']} | Artist: {res['Artist']}")
             print(f"   Score: {res['Score']} | Medium: {desc}\n")
+
+if __name__ == "__main__":
+    run_cli()
