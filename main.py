@@ -4,13 +4,9 @@ Description: Primary entry point for the Art Gallery Search Engine.
              Orchestrates the Ingestion, Testing, and Retrieval pipelines.
 """
 
-# Suppress verbose TF INFO logs
-import os
-
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
 import os
 import sys
+
 from ingest_data import (
     download_dataset,
     process_and_filter,
@@ -20,6 +16,9 @@ from ingest_data import (
 )
 from hybrid_search import ArtGallerySearchEngine
 from evaluate_engine import run_evaluation
+
+# Suppress verbose TF INFO logs
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 
 def bootstrap_system():
@@ -36,7 +35,7 @@ def bootstrap_system():
         try:
             download_dataset(DATA_URL, RAW_FILE)
             process_and_filter(RAW_FILE, OUTPUT_FILE)
-        except Exception as e:
+        except (ConnectionError, FileNotFoundError, KeyError, ValueError) as e:
             print(f"[CRITICAL] Data ingestion failed: {e}")
             sys.exit(1)
     else:
@@ -46,7 +45,7 @@ def bootstrap_system():
     try:
         engine = ArtGallerySearchEngine(OUTPUT_FILE)
         return engine
-    except Exception as e:
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
         print(f"[CRITICAL] Engine initialization failed: {e}")
         sys.exit(1)
 

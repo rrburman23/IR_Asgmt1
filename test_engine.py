@@ -11,6 +11,12 @@ from hybrid_search import ArtGallerySearchEngine
 
 
 class TestArtGallerySearchEngine(unittest.TestCase):
+    """
+    Automated unit test suite for the Art Gallery Search Engine.
+    Validates data ingestion, index construction, query retrieval,
+    and system latency thresholds.
+    """
+
     @classmethod
     def setUpClass(cls):
         """
