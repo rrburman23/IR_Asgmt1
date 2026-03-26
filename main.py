@@ -1,12 +1,19 @@
 """
 File Name: main.py
 Description: Primary entry point for the Art Gallery Search Engine.
-             Orchestrates the Ingestion, Testing, and Retrieval pipelines.
+             Acts as a router to launch either the GUI (default) or the CLI.
 """
+
+# pylint: disable=no-name-in-module, import-outside-toplevel, wrong-import-position
 
 import os
 import sys
+import argparse
 
+# Suppress verbose TF INFO logs before anything else loads
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
+# Import your ingestion pipeline to ensure data exists
 from ingest_data import (
     download_dataset,
     process_and_filter,
@@ -14,67 +21,45 @@ from ingest_data import (
     RAW_FILE,
     OUTPUT_FILE,
 )
-from hybrid_search import ArtGallerySearchEngine
-from evaluate_engine import run_evaluation
 
-# Suppress verbose TF INFO logs
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
-
-def bootstrap_system():
-    """
-    Ensures the environment is prepared before launching the engine.
-    """
-    print("=" * 60)
-    print("ART GALLERY SEARCH ENGINE")
-    print("=" * 60)
-
-    # 1. Pipeline Check: Data Ingestion
+def ensure_data_exists():
+    """Checks if the dataset exists; if not, triggers the download pipeline."""
     if not os.path.exists(OUTPUT_FILE):
         print("[BOOT] Local document store not found. Initializing ETL pipeline...")
         try:
             download_dataset(DATA_URL, RAW_FILE)
             process_and_filter(RAW_FILE, OUTPUT_FILE)
-        except (ConnectionError, FileNotFoundError, KeyError, ValueError) as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             print(f"[CRITICAL] Data ingestion failed: {e}")
             sys.exit(1)
-    else:
-        print(f"[BOOT] Verified existing document store: {OUTPUT_FILE}")
 
-    # 2. Start Engine
+
+def launch_cli():
+    """Launches the Command Line Interface."""
+    # We only import the engine if we are running the CLI to save memory
+    from hybrid_search import ArtGallerySearchEngine
+
+    print("\n" + "=" * 60)
+    print("ART GALLERY SEARCH ENGINE (CLI MODE)")
+    print("=" * 60)
+
     try:
         engine = ArtGallerySearchEngine(OUTPUT_FILE)
-        return engine
-    except (FileNotFoundError, ValueError, RuntimeError) as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         print(f"[CRITICAL] Engine initialization failed: {e}")
         sys.exit(1)
 
-
-def run_interactive_session(engine):
-    """
-    Launches the Command Line Interface for end-users.
-    """
-    print("\n" + "-" * 60)
-    print("SEARCH INTERFACE READY")
-    print(
-        "Type '/exit' to quit. Type '/evaluate' to run metrics (requires evaluate_engine.py)."
-    )
+    print("\nSEARCH INTERFACE READY. Type '/exit' to quit.")
     print("-" * 60)
 
     while True:
-        query = input("\nEnter search query: ")
-        query = " ".join(query.split())
+        query = input("\nEnter search query: ").strip()
 
-        if query.lower() in ["/exit", "/quit"]:
+        if query.lower() in ["/exit", "/quit", "exit", "quit"]:
             print("[INFO] Shutting down engine...")
             break
 
         if not query:
-            continue
-
-        # Option to trigger evaluation from main
-        if query.lower() == "/evaluate":
-            run_evaluation()
             continue
 
         results = engine.hybrid_search(query, top_k=5)
@@ -82,21 +67,44 @@ def run_interactive_session(engine):
         print(f"\n--- TOP {len(results)} RESULTS ---")
         for res in results:
             desc = (
-                res["Description"][:75] + "..."
+                (res["Description"][:75] + "...")
                 if len(res["Description"]) > 75
                 else res["Description"]
             )
-
-            print(f"{res['Rank']}. {res['Title'].strip().title()}")
-            print(f"   Artist: {res['Artist'].strip().title()}")
+            print(f"{res['Rank']}. {res['Title']}")
+            print(f"   Artist: {res['Artist']}")
             print(f"   Medium: {desc}")
             print(f"   Score:  {res['Score']}")
+            if res.get("Thumbnail"):
+                print(f"   Image:  {res['Thumbnail']}")
             print("-" * 20)
 
 
-if __name__ == "__main__":
-    # Initialize the system
-    search_engine = bootstrap_system()
+def launch_gui():
+    """Launches the Graphical User Interface."""
+    from gui import ArtSearchGUI
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication(sys.argv)
+    window = ArtSearchGUI()
+    window.show()
+    sys.exit(app.exec())
 
-    # Launch CLI
-    run_interactive_session(search_engine)
+
+if __name__ == "__main__":
+    # 1. Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Tate Gallery Search Engine")
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Launch the app in Command Line Interface mode instead of the GUI.",
+    )
+    args = parser.parse_args()
+
+    # 2. Make sure we have data before starting anything
+    ensure_data_exists()
+
+    # 3. Route to the correct interface
+    if args.cli:
+        launch_cli()
+    else:
+        launch_gui()

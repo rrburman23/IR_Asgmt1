@@ -9,3 +9,6 @@ rank_bm25
 # Natural Language Processing (Semantic)
 sentence-transformers
 torch
+
+# GUI
+PyQt6

@@ -1,5 +1,5 @@
 """
-File Name: Hybrid Search Engine core
+File Name: hybrid_search.py
 Description: Implements a dual-pipeline retrieval system using BM25 for sparse
              lexical matching and Exact k-NN (Sentence Transformers) for dense
              semantic matching, fused via Reciprocal Rank Fusion (RRF).
@@ -31,16 +31,27 @@ class ArtGallerySearchEngine:
         """
         print("[INFO] Loading Document Store...")
         self.df = pd.read_csv(data_path)
+
         # Ensure text columns are strings to prevent tokenization errors
         self.df["title"] = self.df["title"].fillna("").astype(str)
         self.df["artist"] = self.df["artist"].fillna("").astype(str)
         self.df["medium"] = self.df["medium"].fillna("").astype(str)
+        # Ensure the thumbnail URL is loaded as a string
+        self.df["thumbnailurl"] = self.df["thumbnailurl"].fillna("").astype(str)
 
-        # Combine Title and Artist for the Exact-Match Sparse Index
-        self.sparse_corpus = (self.df["title"] + " " + self.df["artist"]).tolist()
+        # Create a rich, combined text field for both indexes to prevent
+        # semantic mismatches (comparing apples to oranges).
+        combined_text = (
+            self.df["title"]
+            + " by "
+            + self.df["artist"]
+            + ". Medium: "
+            + self.df["medium"]
+        ).tolist()
 
-        # Use Medium/Description for the Semantic Dense Index
-        self.dense_corpus = self.df["medium"].tolist()
+        # Use the same comprehensive text for both lexical and semantic search
+        self.sparse_corpus = combined_text
+        self.dense_corpus = combined_text
 
         self.bm25 = None
         self.dense_model = None
@@ -60,6 +71,7 @@ class ArtGallerySearchEngine:
         print("[INFO] Building Dense Vector Index (BERT)...")
         # Using a lightweight, highly efficient pre-trained transformer
         self.dense_model = SentenceTransformer("all-MiniLM-L6-v2")
+
         # Generate dense embeddings for all descriptions
         self.document_embeddings = self.dense_model.encode(
             self.dense_corpus, convert_to_numpy=True
@@ -67,9 +79,7 @@ class ArtGallerySearchEngine:
         print("[SUCCESS] All indexes built successfully.")
 
     def search_sparse(self, query, top_k=100):
-        """
-        Online Phase: Executes BM25 keyword matching.
-        """
+        """Online Phase: Executes BM25 keyword matching."""
         tokenized_query = query.lower().split(" ")
         scores = self.bm25.get_scores(tokenized_query)
         # Get indices of top ranked documents
@@ -77,15 +87,10 @@ class ArtGallerySearchEngine:
         return {idx: rank for rank, idx in enumerate(top_indices)}
 
     def search_dense(self, query, top_k=100):
-        """
-        Online Phase: Executes Exact k-NN cosine similarity on dense vectors.
-        """
+        """Online Phase: Executes Exact k-NN cosine similarity on dense vectors."""
         query_embedding = self.dense_model.encode([query], convert_to_numpy=True)
-
         # Compute exact cosine similarity via dot product (vectors are normalized)
-        # This satisfies the Exact k-NN requirement justified in the report
         scores = np.dot(self.document_embeddings, query_embedding.T).flatten()
-
         top_indices = np.argsort(scores)[::-1][:top_k]
         return {idx: rank for rank, idx in enumerate(top_indices)}
 
@@ -95,13 +100,12 @@ class ArtGallerySearchEngine:
         Records and outputs execution latency.
         """
         start_time = time.perf_counter()
-
         print(f"\n[QUERY] '{query}'")
 
         sparse_ranks = self.search_sparse(query)
         dense_ranks = self.search_dense(query)
 
-        # Reciprocal Rank Fusion (RRF)
+        # Reciprocal Rank Fusion (RRF) algorithm implementation
         rrf_scores = {}
         for idx in range(len(self.df)):
             score = 0.0
@@ -115,7 +119,7 @@ class ArtGallerySearchEngine:
         # Sort by fused score
         ranked_indices = sorted(rrf_scores, key=rrf_scores.get, reverse=True)[:top_k]
 
-        # Format the output
+        # Format the output dictionary with all required fields, including the thumbnail URL
         results = []
         for rank, idx in enumerate(ranked_indices):
             doc = self.df.iloc[idx]
@@ -126,6 +130,7 @@ class ArtGallerySearchEngine:
                     "Title": doc["title"],
                     "Artist": doc["artist"],
                     "Description": doc["medium"],
+                    "Thumbnail": doc["thumbnailurl"],  # Pass the image URL
                     "Score": round(rrf_scores[idx], 4),
                 }
             )
@@ -134,46 +139,3 @@ class ArtGallerySearchEngine:
         print(f"[TIMING] Retrieval and fusion completed in {latency:.4f} seconds.")
 
         return results
-
-
-# ==========================================
-# Interactive Command Line Interface
-# ==========================================
-def run_cli():
-    """Runs the interactive Command Line Interface for the search engine."""
-    print("\n" + "=" * 50)
-    print("ART GALLERY SEARCH ENGINE INITIALIZING...")
-    print("=" * 50)
-
-    # Initialize the engine
-    engine = ArtGallerySearchEngine("art_gallery_data.csv")
-    print("\n[READY] Type your query below. Type 'exit' or 'quit' to stop.")
-
-    while True:
-        user_query = input("\nEnter search query: ").strip()
-
-        if user_query.lower() in ["exit", "quit"]:
-            print("Shutting down search engine.")
-            break
-
-        if not user_query:
-            continue
-
-        # Execute search and capture end-to-end interface latency
-        cli_start_time = time.perf_counter()
-        results = engine.hybrid_search(user_query, top_k=5)
-        cli_latency = time.perf_counter() - cli_start_time
-
-        # Display results utilizing standard search engine formatting
-        print(f"\n--- Top {len(results)} Results ({cli_latency:.4f} seconds) ---")
-        for res in results:
-            desc = (
-                res["Description"][:75] + "..."
-                if len(res["Description"]) > 75
-                else res["Description"]
-            )
-            print(f"{res['Rank']}. {res['Title']} | Artist: {res['Artist']}")
-            print(f"   Score: {res['Score']} | Medium: {desc}\n")
-
-if __name__ == "__main__":
-    run_cli()

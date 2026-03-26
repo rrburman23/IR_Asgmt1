@@ -6,7 +6,6 @@ Description: Automates the acquisition of the Tate Gallery metadata,
 
 import os
 import re
-
 import pandas as pd
 import requests
 
@@ -44,11 +43,6 @@ def download_dataset(url, filename, timeout=30):
 def normalize_text(text):
     """
     Light text normalization suitable for BOTH BM25 and dense models.
-
-    NOTE:
-    - Lowercases text
-    - Normalizes whitespace
-    - Preserves punctuation (important for semantic models)
     """
     if not isinstance(text, str):
         return ""
@@ -58,73 +52,56 @@ def normalize_text(text):
     return text.strip()
 
 
-def process_and_filter(input_file, output_file, sample_size=2000):
+def process_and_filter(input_file, output_file, sample_size=10000):
     """
     Cleans metadata, normalizes text, and exports a balanced subset.
     """
-
     print("[INFO] Processing and filtering metadata...")
 
     if not os.path.exists(input_file):
         raise FileNotFoundError(f"Input file {input_file} not found.")
 
-    # --------------------------------------------------
     # Load dataset
-    # --------------------------------------------------
     df = pd.read_csv(input_file, low_memory=False)
 
-    # --------------------------------------------------
     # Column normalization
-    # --------------------------------------------------
     df.columns = df.columns.str.lower().str.strip()
 
-    required_columns = ["id", "artist", "title", "medium", "year"]
+    # ADDED: thumbnailurl to capture image links
+    required_columns = ["id", "artist", "title", "medium", "year", "thumbnailurl"]
 
-    for col in required_columns:
-        if col not in df.columns:
-            raise KeyError(f"Required column '{col}' not found in dataset.")
+    # Graceful check for required columns
+    missing_cols = [col for col in required_columns if col not in df.columns]
+    if missing_cols:
+        raise KeyError(f"Required columns {missing_cols} not found in dataset.")
 
     df = df[required_columns].copy()
 
-    # --------------------------------------------------
     # Data cleaning
-    # --------------------------------------------------
     initial_size = len(df)
 
-    df.dropna(subset=["artist", "title", "medium"], inplace=True)
+    # Drop rows if they are missing the image URL
+    df.dropna(subset=["artist", "title", "medium", "thumbnailurl"], inplace=True)
     df.drop_duplicates(subset=["id"], inplace=True)
-
-    # Optional diagnostic
-    if df["id"].duplicated().any():
-        print("[WARNING] Duplicate IDs detected after cleaning.")
 
     print(f"[INFO] Records before cleaning: {initial_size}")
     print(f"[INFO] Records after cleaning:  {len(df)}")
 
-    # --------------------------------------------------
     # Text normalization
-    # --------------------------------------------------
     for col in ["artist", "title", "medium"]:
         df[col] = df[col].astype(str).apply(normalize_text)
 
-    # --------------------------------------------------
     # Robust sampling
-    # --------------------------------------------------
     actual_sample_size = min(len(df), sample_size)
-
     if actual_sample_size < sample_size:
         print(
-            f"[WARNING] Dataset size ({len(df)}) is smaller than "
-            f"requested sample ({sample_size})."
+            f"[WARNING] Dataset size ({len(df)}) is smaller than requested sample ({sample_size})."
         )
 
     df_final = df.sample(n=actual_sample_size, random_state=42)
 
-    # --------------------------------------------------
     # Export
-    # --------------------------------------------------
     df_final.to_csv(output_file, index=False)
-
     print(f"[SUCCESS] Final dataset size: {len(df_final)}")
     print(f"[SUCCESS] Saved to {output_file}")
 
@@ -132,6 +109,8 @@ def process_and_filter(input_file, output_file, sample_size=2000):
 if __name__ == "__main__":
     try:
         download_dataset(DATA_URL, RAW_FILE)
+
+        # Run the processing pipeline
         process_and_filter(RAW_FILE, OUTPUT_FILE)
 
     except (
