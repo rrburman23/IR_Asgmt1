@@ -1,15 +1,17 @@
 """
 File Name: gui.py
-Description: A PyQt6 graphical interface for the Art Gallery Hybrid Search Engine.
+Description: Optimized PyQt6 GUI with image caching and instant text rendering.
+             Uses an internal dictionary to prevent redundant web requests.
 """
 
-# pylint: disable=no-name-in-module
+# pylint: disable=no-name-in-module, broad-exception-caught
 
 import sys
 import base64
+import urllib.parse
 import requests
-
 import torch  # pylint: disable=unused-import # noqa: F401
+
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -31,15 +33,14 @@ from ingest_data import OUTPUT_FILE
 # 1. Background Worker Thread
 # ==========================================
 class EngineLoadThread(QThread):
-    """Loads the search engine in the background to keep the UI responsive."""
+    """Initializes the AI backend without locking the GUI window."""
 
     engine_ready = pyqtSignal(object)
     error_occurred = pyqtSignal(str)
 
     def run(self):
-        """Executes the engine initialization."""
+        """Background execution logic."""
         try:
-            # pylint: disable=broad-exception-caught
             engine = ArtGallerySearchEngine(OUTPUT_FILE)
             self.engine_ready.emit(engine)
         except Exception as e:
@@ -50,16 +51,17 @@ class EngineLoadThread(QThread):
 # 2. Main GUI Application
 # ==========================================
 class ArtSearchGUI(QMainWindow):
-    """Main window class for the Art Gallery Search GUI."""
+    """Optimized interface for high-speed semantic art discovery."""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Tate Gallery | Semantic Search")
+        self.setWindowTitle("Tate Gallery | High-Speed Semantic Search")
         self.resize(950, 750)
-        self.apply_modern_styling()
 
-        self.engine = None
-        self.load_thread = None
+        # Memory Cache: Prevents re-downloading images during a single session
+        self.image_cache = {}
+
+        self.apply_modern_styling()
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -68,191 +70,135 @@ class ArtSearchGUI(QMainWindow):
         self.layout.setSpacing(15)
 
         self._setup_ui()
-        self._start_engine_thread()
+
+        # Trigger the background AI engine loader
+        self.engine_thread = EngineLoadThread()
+        self.engine_thread.engine_ready.connect(self._on_engine_ready)
+        self.engine_thread.error_occurred.connect(self._on_error)
+        self.engine_thread.start()
 
     def apply_modern_styling(self):
-        """Injects QSS (Qt Style Sheets) for a dark-mode aesthetic."""
-        self.setStyleSheet(
-            """
-            QMainWindow { background-color: #121212; }
+        """Sets the dark-mode aesthetic via QSS."""
+        self.setStyleSheet("""
+            QMainWindow { background-color: #0f0f0f; }
             QWidget { font-family: 'Segoe UI', sans-serif; }
-            QLineEdit {
-                padding: 12px; border: 1px solid #333333;
-                border-radius: 8px; background-color: #1e1e1e;
-                color: #ffffff; font-size: 15px;
-            }
-            QLineEdit:focus { border: 1px solid #3498db; }
-            QPushButton {
-                padding: 12px 24px; background-color: #2980b9;
-                color: white; border-radius: 8px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #3498db; }
-            QPushButton:disabled { background-color: #2c3e50; color: #7f8c8d; }
-            QTextBrowser {
-                background-color: #1e1e1e; color: #e0e0e0;
-                border: 1px solid #333333; border-radius: 8px; padding: 15px;
-            }
-        """
-        )
+            QLineEdit { padding: 12px; border-radius: 8px; background: #1a1a1a; color: white; border: 1px solid #333; }
+            QPushButton { padding: 12px; border-radius: 8px; background: #2980b9; color: white; font-weight: bold; }
+            QPushButton:hover { background: #3498db; }
+            QTextBrowser { background: #141414; color: #ccc; border: 1px solid #222; border-radius: 8px; padding: 10px; }
+        """)
 
     def _setup_ui(self):
-        """Sets up the search bar, buttons, and results display area."""
-        self.top_layout = QHBoxLayout()
-
+        """Constructs the search bar and results display."""
+        nav = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search for artwork...")
+        self.search_input.setPlaceholderText(
+            "Search the collection (e.g., 'sunset over the sea')..."
+        )
         self.search_input.returnPressed.connect(self.perform_search)
 
-        self.search_button = QPushButton("Search")
-        self.search_button.clicked.connect(self.perform_search)
+        btn_search = QPushButton("Search")
+        btn_search.clicked.connect(self.perform_search)
 
-        self.clear_button = QPushButton("Clear")
-        self.clear_button.clicked.connect(self.clear_results)
-        self.clear_button.setStyleSheet(
-            """
-            QPushButton { background-color: #7f8c8d; }
-            QPushButton:hover { background-color: #95a5a6; }
-        """
+        nav.addWidget(self.search_input)
+        nav.addWidget(btn_search)
+
+        self.status = QLabel("Initializing AI... (Loading Cache)")
+        self.status.setStyleSheet("color: #f39c12; font-style: italic;")
+
+        self.results_area = QTextBrowser()
+
+        self.layout.addLayout(nav)
+        self.layout.addWidget(self.status)
+        self.layout.addWidget(self.results_area)
+
+    def _on_engine_ready(self, engine):
+        """Enables search interface once the engine is hot."""
+        self.engine = engine
+        self.status.setText("Engine Online. Ready.")
+        self.status.setStyleSheet("color: #2ecc71;")
+
+    def _on_error(self, err):
+        """Displays error if initialization fails."""
+        self.status.setText(f"Critical Error: {err}")
+        self.status.setStyleSheet("color: #e74c3c;")
+
+    def _get_img_b64(self, url, title):
+        """Fetches, patches, and encodes images with session caching."""
+        if url in self.image_cache:
+            return self.image_cache[url]
+
+        # Patch dead Tate URLs to the new CDN on-the-fly
+        target_url = (
+            url.replace("http://www.tate.org.uk", "https://media.tate.org.uk")
+            if "tate.org.uk" in url
+            else url
         )
 
-        self.top_layout.addWidget(self.search_input)
-        self.top_layout.addWidget(self.search_button)
-        self.top_layout.addWidget(self.clear_button)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        try:
+            r = requests.get(target_url, headers=headers, timeout=3)
+            if r.status_code != 200:
+                raise Exception("Dead Link")
+            b64 = base64.b64encode(r.content).decode()
+        except Exception:
+            # Graceful Fallback: Generate a placeholder image via API
+            safe_t = urllib.parse.quote(title[:12] + ".." if len(title) > 12 else title)
+            f_url = f"https://placehold.co/140x100/2c3e50/ecf0f1?text={safe_t}"
+            r = requests.get(f_url, timeout=3)
+            b64 = base64.b64encode(r.content).decode()
 
-        self.status_label = QLabel("Loading AI models... This may take a moment.")
-        self.status_label.setStyleSheet("color: #f39c12; font-style: italic;")
-
-        self.results_display = QTextBrowser()
-        self.results_display.setOpenExternalLinks(True)
-
-        self.layout.addLayout(self.top_layout)
-        self.layout.addWidget(self.status_label)
-        self.layout.addWidget(self.results_display)
-
-        self.search_input.setEnabled(False)
-        self.search_button.setEnabled(False)
-        self.clear_button.setEnabled(False)
-
-    def _start_engine_thread(self):
-        """Initializes the background thread to load the search engine."""
-        self.load_thread = EngineLoadThread()
-        self.load_thread.engine_ready.connect(self.on_engine_ready)
-        self.load_thread.error_occurred.connect(self.on_engine_error)
-        self.load_thread.start()
-
-    def on_engine_ready(self, loaded_engine):
-        """Slot called when the background thread finishes successfully."""
-        self.engine = loaded_engine
-        self.status_label.setText("Engine Online. Ready for queries.")
-        self.status_label.setStyleSheet("color: #2ecc71;")
-
-        self.search_input.setEnabled(True)
-        self.search_button.setEnabled(True)
-        self.clear_button.setEnabled(True)
-        self.search_input.setFocus()
-
-    def on_engine_error(self, error_msg):
-        """Slot called if the background thread crashes."""
-        self.status_label.setText(f"Critical Error: {error_msg}")
-        self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
+        self.image_cache[url] = b64
+        return b64
 
     def perform_search(self):
-        """Executes the hybrid search and formats the output."""
+        """Handles the search event and renders results."""
         query = self.search_input.text().strip()
-        if not query:
+        if not query or not hasattr(self, "engine"):
             return
 
-        self.status_label.setText(f"Searching for: '{query}'...")
-        self.status_label.setStyleSheet("color: #3498db;")
-        QApplication.processEvents()
+        self.status.setText("Retrieving matches...")
+        QApplication.processEvents()  # Refresh label
 
-        try:
-            # pylint: disable=broad-exception-caught
-            results = self.engine.hybrid_search(query, top_k=10)
-            self.display_results(results, query)
-            self.status_label.setText(f"Found {len(results)} results.")
-            self.status_label.setStyleSheet("color: #2ecc71;")
-        except Exception as e:
-            self.results_display.setHtml(f"<p style='color:#e74c3c;'>Error: {e}</p>")
-            self.status_label.setText("Error during search.")
-
-    def clear_results(self):
-        """Clears the search bar and the results display."""
-        self.search_input.clear()
-        self.results_display.clear()
-        self.status_label.setText("Engine Online. Ready for queries.")
-        self.status_label.setStyleSheet("color: #2ecc71;")
-        self.search_input.setFocus()
+        results = self.engine.hybrid_search(query)
+        self.display_results(results, query)
+        self.status.setText(f"Completed. Found {len(results)} items.")
 
     def display_results(self, results, query):
-        """Formats the dictionary results into readable HTML with base64 images."""
-        if not results:
-            self.results_display.setHtml(
-                f"<h3 style='color:#e0e0e0;'>No results found for '{query}'.</h3>"
-            )
-            return
-
-        html_output = (
-            f"<h2 style='color: #ffffff; margin-bottom: 20px;'>"
-            f"Top Results for '{query}'</h2>"
-        )
+        """Compiles search results into rich HTML."""
+        html = f"<h2 style='color:white'>Search Results: '{query}'</h2><hr>"
 
         for res in results:
-            title = res.get("Title", "Unknown Title").title()
-            artist = res.get("Artist", "Unknown Artist").title()
-            medium = res.get("Description", "No description available.")
-            score = res.get("Score", 0.0)
-            thumbnail_url = res.get("Thumbnail", "")
+            # Fetch image (will pull from cache if repeated)
+            b64 = self._get_img_b64(res["Thumbnail"], res["Title"])
 
-            # Default placeholder broken into multiple lines
-            img_html = (
-                "<div style='width:140px; height:100px; background-color:#2c3e50; "
-                "text-align:center; line-height:100px; color:#7f8c8d; "
-                "border-radius:4px;'>No Image</div>"
-            )
+            html += f"""
+            <table width='100%' style='margin-bottom:15px'>
+                <tr>
+                    <td width='150' valign='top'>
+                        <img src='data:image/jpeg;base64,{b64}' width='140' style='border-radius:4px;'/>
+                    </td>
+                    <td valign='top'>
+                        <b style='color:#3498db; font-size:17px'>{res["Rank"]}. {res["Title"].title()}</b><br>
+                        <span style='color:#ecf0f1; font-size:14px'><b>Artist:</b> {res["Artist"].title()}</span><br>
+                        <i style='color:#999; font-size:13px'>Medium: {res["Description"]}</i><br>
+                        <span style='color:#666; font-size:11px'>Relevance: {res["Score"]}</span>
+                    </td>
+                </tr>
+            </table>
+            <hr style='border:none; border-top:1px solid #222;'>
+            """
+        self.results_area.setHtml(html)
 
-            if thumbnail_url and str(thumbnail_url).startswith("http"):
-                try:
-                    headers = {
-                        "User-Agent": (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36"
-                        )
-                    }
-                    img_res = requests.get(thumbnail_url, headers=headers, timeout=5)
-
-                    if img_res.status_code == 200:
-                        b64_data = base64.b64encode(img_res.content).decode("utf-8")
-                        img_html = (
-                            f"<img src='data:image/jpeg;base64,{b64_data}' "
-                            f"width='140' style='border-radius:4px;'/>"
-                        )
-                    else:
-                        print(f"Server rejected image: HTTP {img_res.status_code}")
-                except Exception as e:  # pylint: disable=broad-exception-caught
-                    print(f"Failed to load image for {title}: {e}")
-
-            # Build the HTML table using multiple string concatenations
-            html_output += (
-                f"<table width='100%' style='margin-bottom: 15px;'>"
-                f"<tr><td width='150' valign='top'>{img_html}</td>"
-                f"<td valign='top'>"
-                f"<h3 style='margin: 0; color: #3498db; font-size: 18px;'>"
-                f"{res['Rank']}. {title}</h3>"
-                f"<p style='margin: 4px 0 2px 0; color: #ecf0f1; font-size: 15px;'>"
-                f"<b>Artist:</b> {artist}</p>"
-                f"<p style='margin: 2px 0; color: #bdc3c7; font-size: 14px;'>"
-                f"<i>Medium: {medium}</i></p>"
-                f"<p style='margin: 4px 0 0 0; font-size: 12px; color: #7f8c8d;'>"
-                f"Relevance Score: {score}</p></td></tr></table>"
-                f"<hr style='border:none; border-top:1px solid #333333; margin:15px 0;'>"
-            )
-
-        self.results_display.setHtml(html_output)
+    def clear_results(self):
+        """Resets the UI view."""
+        self.search_input.clear()
+        self.results_area.clear()
+        self.status.setText("Engine Online. Ready.")
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = ArtSearchGUI()
-    window.show()
+    win = ArtSearchGUI()
+    win.show()
     sys.exit(app.exec())
