@@ -62,21 +62,20 @@ def launch_cli():
         if not query:
             continue
 
+        # Inside launch_cli() in main.py, update the print loop:
+
         results = engine.hybrid_search(query, top_k=5)
 
         print(f"\n--- TOP {len(results)} RESULTS ---")
         for res in results:
-            desc = (
-                (res["Description"][:75] + "...")
-                if len(res["Description"]) > 75
-                else res["Description"]
-            )
+            # Note: res['Title'] and res['Artist'] are already formatted by the engine!
             print(f"{res['Rank']}. {res['Title']}")
             print(f"   Artist: {res['Artist']}")
-            print(f"   Medium: {desc}")
+            print(f"   Medium: {res['Description']}")
             print(f"   Score:  {res['Score']}")
-            if res.get("Thumbnail"):
-                print(f"   Image:  {res['Thumbnail']}")
+            print(
+                f"   Link:   {res['Thumbnail']}"
+            )  
             print("-" * 20)
 
 
