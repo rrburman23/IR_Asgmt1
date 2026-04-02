@@ -36,16 +36,6 @@ class TestArtGallerySearchEngine(unittest.TestCase):
         self.assertGreater(
             len(self.engine.df), 0, "Document store must contain records."
         )
-        self.assertEqual(
-            len(self.engine.sparse_corpus),
-            len(self.engine.df),
-            "Sparse corpus size mismatch.",
-        )
-        self.assertEqual(
-            len(self.engine.dense_corpus),
-            len(self.engine.df),
-            "Dense corpus size mismatch.",
-        )
 
     def test_indexes_built(self):
         """
@@ -58,10 +48,15 @@ class TestArtGallerySearchEngine(unittest.TestCase):
             self.engine.document_embeddings,
             "Dense document embedding generation failed.",
         )
-        self.assertEqual(
+        self.assertGreaterEqual(
             len(self.engine.document_embeddings),
             len(self.engine.df),
-            "Embedding count mismatch.",
+            "Embedding count should be >= document count due to chunking.",
+        )
+        self.assertEqual(
+            len(self.engine.chunk_to_doc_idx),
+            len(self.engine.document_embeddings),
+            "Chunk mapping array size must match embeddings array size."
         )
 
     def test_sparse_retrieval(self):
@@ -100,7 +95,7 @@ class TestArtGallerySearchEngine(unittest.TestCase):
         )
 
         first_result = results[0]
-        expected_keys = ["Rank", "Title", "Artist", "Description", "Score"]
+        expected_keys = ["Rank", "Title", "Artist", "Description", "Year", "Score", "Reasons"]
         for key in expected_keys:
             self.assertIn(key, first_result, f"Result dictionary missing key: {key}")
 

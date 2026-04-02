@@ -6,6 +6,7 @@ Description: Primary entry point for the Art Gallery Search Engine.
 
 import os
 import sys
+import pandas as pd
 
 from ingest_data import (
     download_dataset,
@@ -56,14 +57,13 @@ def run_interactive_session(engine):
     """
     print("\n" + "-" * 60)
     print("SEARCH INTERFACE READY")
-    print(
-        "Type '/exit' to quit. Type '/evaluate' to run metrics (requires evaluate_engine.py)."
-    )
+    print("Type '/exit' to quit. Type '/evaluate' to run metrics.")
+    print("Optional: Use '| key:val' to apply metadata filters (e.g., 'landscape | year:1888').")
     print("-" * 60)
 
     while True:
         query = input("\nEnter search query: ")
-        query = " ".join(query.split())
+        query = query.strip()
 
         if query.lower() in ["/exit", "/quit"]:
             print("[INFO] Shutting down engine...")
@@ -77,7 +77,18 @@ def run_interactive_session(engine):
             run_evaluation()
             continue
 
-        results = engine.hybrid_search(query, top_k=5)
+        # Parse optional filters
+        parts = query.split("|")
+        search_query = " ".join(parts[0].split())
+        
+        filters = {}
+        if len(parts) > 1:
+            for part in parts[1:]:
+                if ":" in part:
+                    k, v = part.split(":", 1)
+                    filters[k.strip().lower()] = v.strip()
+
+        results = engine.hybrid_search(search_query, top_k=5, filters=filters)
 
         print(f"\n--- TOP {len(results)} RESULTS ---")
         for res in results:
@@ -87,10 +98,12 @@ def run_interactive_session(engine):
                 else res["Description"]
             )
 
-            print(f"{res['Rank']}. {res['Title'].strip().title()}")
+            year_str = f" | Year: {res['Year']}" if pd.notna(res['Year']) else ""
+            print(f"{res['Rank']}. {res['Title'].strip().title()}{year_str}")
             print(f"   Artist: {res['Artist'].strip().title()}")
             print(f"   Medium: {desc}")
-            print(f"   Score:  {res['Score']}")
+            print(f"   Score:  {res['Score']:.4f}")
+            print(f"   Why this result?: {res['Reasons']}")
             print("-" * 20)
 
 

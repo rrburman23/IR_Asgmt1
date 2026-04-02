@@ -99,6 +99,13 @@ def run_evaluation(data_path="art_gallery_data.csv"):
             "head of a woman",
             "seated woman",
         ],
+        "impressionist landscapes": [
+            "landscape", "impressionist", "water lilies", "garden"
+        ],
+        "religious figures and angels": [
+            "angel", "christ", "madonna", "saints"
+        ],
+        "modernist cars": [], # Negative test (should yield poor matches)
     }
 
     mrr_scores, ndcg_scores, latencies = [], [], []
@@ -127,6 +134,15 @@ def run_evaluation(data_path="art_gallery_data.csv"):
 
     print("\n--- Phase 2: Semantic Retrieval (NDCG@10) ---")
     for query, rel_titles in semantic_qrels.items():
+        # Negative test handling
+        if not rel_titles:
+            start = time.perf_counter()
+            raw_results = engine.hybrid_search(query, top_k=10)
+            qlat = time.perf_counter() - start
+            latencies.append(qlat)
+            print(f"Query: '{query:<30}' | Latency: {qlat * 1000:6.2f}ms | NEGATIVE TEST")
+            continue
+
         relevant_ids = resolve_titles_to_ids(engine.df, rel_titles)
 
         if not relevant_ids:
