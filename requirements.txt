@@ -1,14 +1,11 @@
-# Data Processing and Networking
-pandas
-requests
-numpy
-
-# Information Retrieval (Lexical)
-rank_bm25
-
-# Natural Language Processing (Semantic)
-sentence-transformers
+--extra-index-url https://download.pytorch.org/whl/cu130
 torch
-
-# GUI
+torchvision
+torchaudio
+pandas
+numpy
 PyQt6
+sentence-transformers
+rank_bm25
+requests
+Levenshtein

@@ -56,7 +56,6 @@ def launch_evaluation():
     Mean Reciprocal Rank (MRR) and NDCG@10 for predefined query judgments.
     """
     # pylint: disable=import-outside-toplevel
-    # Lazy load the evaluation module
     from evaluate_engine import run_evaluation
 
     # The run_evaluation function handles its own clean terminal output
@@ -71,8 +70,7 @@ def launch_evaluation():
 def launch_cli():
     """
     Starts the terminal-based interactive search interface.
-    Provides continuous querying and allows execution of tests/evaluations
-    via slash commands (/test, /evaluate) directly from the prompt.
+    Updated to display Match Logic and Spelling Suggestions.
     """
     print("\n" + "=" * 60)
     print("TATE GALLERY SEARCH | CLI MODE")
@@ -105,17 +103,26 @@ def launch_cli():
                 # Execute standard hybrid search retrieval
                 results = engine.hybrid_search(query, top_k=5)
 
+                if not results:
+                    print("[INFO] No matching artworks found.")
+                    continue
+
+                # NEW: Display Spelling Suggestion if one was generated
+                if results[0].get("Suggestion"):
+                    print(f"\n[!] Did you mean: '{results[0]['Suggestion']}'?")
+
                 # Format output for terminal readability
                 print(f"\n--- TOP {len(results)} RESULTS ---")
                 for res in results:
                     print(f"{res['Rank']}. {res['Title']}")
                     print(f"   Artist: {res['Artist']}")
+                    # NEW: Display the transparency logic
+                    print(f"   Logic:  {res['Reasons']}")
                     print(f"   Score:  {res['Score']}")
                     print(f"   Link:   {res['Thumbnail']}")
                     print("-" * 20)
 
             except KeyboardInterrupt:
-                # Catch Ctrl+C gracefully in the terminal instead of crashing
                 print("\n[INFO] Interrupt received. Shutting down...")
                 break
 
@@ -126,57 +133,29 @@ def launch_cli():
 
 def launch_gui():
     """
-    Starts the PyQt6 Graphical Interface.
-    Implements a QTimer heartbeat to ensure the Python interpreter
-    can catch system signals (like SIGINT/Ctrl+C) while the C++ Qt loop runs.
+    Starts the PyQt6 Graphical Interface with OS signal handling.
     """
-    # 1. Instruct Python to use the default OS behavior for interrupt signals
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-
     app = QApplication(sys.argv)
 
-    # 2. The 'Heartbeat' Timer
-    # Python suspends execution when `app.exec()` runs. This timer wakes
-    # the interpreter up every 500ms so it can detect if Ctrl+C was pressed.
     timer = QTimer()
     timer.start(500)
     timer.timeout.connect(lambda: None)
 
-    # 3. Initialize and display the main window
     window = ArtSearchGUI()
     window.show()
-
-    # 4. Start the application event loop
     sys.exit(app.exec())
 
 
-# ==========================================
-# 3. Execution Routing
-# ==========================================
-
 if __name__ == "__main__":
-    # Configure command-line arguments for the master router
     parser = argparse.ArgumentParser(description="Tate Gallery AI Search Engine")
-    parser.add_argument(
-        "--cli",
-        action="store_true",
-        help="Run the application in terminal mode instead of launching the GUI.",
-    )
-    parser.add_argument(
-        "--test", action="store_true", help="Run the automated unit test suite."
-    )
-    parser.add_argument(
-        "--evaluate",
-        action="store_true",
-        help="Run the formal IR metrics evaluation pipeline.",
-    )
+    parser.add_argument("--cli", action="store_true", help="Run in CLI mode.")
+    parser.add_argument("--test", action="store_true", help="Run unit tests.")
+    parser.add_argument("--evaluate", action="store_true", help="Run evaluation.")
     args = parser.parse_args()
 
-    # Pre-flight check: Ensure dataset exists or download it automatically
     ensure_data_exists()
 
-    # Route execution based on flags provided by the user
-    # Priority order ensures tests/evaluations run first if multiple flags are passed
     if args.test:
         launch_tests()
     elif args.evaluate:
@@ -184,5 +163,4 @@ if __name__ == "__main__":
     elif args.cli:
         launch_cli()
     else:
-        # Default behavior with no flags
         launch_gui()

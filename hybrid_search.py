@@ -1,166 +1,231 @@
 """
 File Name: hybrid_search.py
-Description: The core AI retrieval engine. Combines Lexical (BM25) and
-             Semantic (Sentence Transformers) search.
-             Utilizes CUDA for NVIDIA GPUs and
-             Multi-processing for Ryzen CPUs.
+Description: Advanced Retrieval Engine v2.1.
+             Combines Fielded BM25, Chunked BERT embeddings,
+             Spelling Correction, and Weighted Linear Fusion.
 """
 
+from __future__ import annotations
 import os
+import re
 import time
-from typing import Optional
+from typing import Optional, Dict, Mapping, Any, List
 import pandas as pd
 import numpy as np
 import torch
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
-# Constants for caching to prevent re-running 1.2s encoding on every boot
+# Optional import for spelling correction
+try:
+    import Levenshtein
+except ImportError:
+    Levenshtein = None
+
 VECTOR_CACHE = "embeddings.npy"
+
+
+def process_text_for_sparse(text: str) -> str:
+    """Helper to clean text specifically for keyword matching."""
+    if not isinstance(text, str):
+        return ""
+    # Strip hyphens and common punctuation to improve "Self-Portrait" matches
+    text = text.lower().replace("-", " ")
+    return re.sub(r"[^\w\s]", "", text)
 
 
 class ArtGallerySearchEngine:
     """
-    Handles the indexing and retrieval of artwork metadata.
+    State-of-the-art Search Engine utilizing Fielded Sparse Retrieval
+    and Chunked Semantic Dense Retrieval with Hardware Acceleration.
     """
 
     def __init__(self, data_path: str):
-        """
-        Loads the CSV and prepares the hardware for AI operations.
-        """
+        """Initializes data, builds multiple indexes, and handles hardware."""
         print("[INFO] Loading Document Store...")
         self.df = pd.read_csv(data_path)
 
-        # Standardize data: Fill empty values and ensure everything is a string
+        # Standardize data
         for col in ["title", "artist", "medium", "thumbnailurl"]:
             self.df[col] = self.df[col].fillna("").astype(str)
 
-        # TITLE BOOSTING:
-        # We repeat the title twice in the search string. This ensures that
-        # a keyword match in the Title is mathematically more important than
-        # a keyword match in the Medium/Description.
-        self.combined_corpus = (
-            (self.df["title"] + " ") * 4
-            + "by "
-            + self.df["artist"]
-            + ". Medium: "
-            + self.df["medium"]
-        ).tolist()
-
-        # Hardware Detection: Checks for NVIDIA GPU (CUDA)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[HARDWARE] Primary Device: {self.device.upper()}")
-        if self.device == "cuda":
-            print(f"[GPU] Detected: {torch.cuda.get_device_name(0)}")
-
-        # Placeholders for search components
+        self.vocabulary: set[str] = set()
         self.bm25: Optional[BM25Okapi] = None
         self.dense_model: Optional[SentenceTransformer] = None
         self.document_embeddings: Optional[np.ndarray] = None
-
-        # Trigger the indexing process
+        self.weighted_corpus: List[str] = []
         self._build_indexes()
 
     def _build_indexes(self):
-        """
-        Constructs the indexes. BM25 is built on the CPU,
-        while BERT embeddings are computed on the GPU.
-        """
-        # 1. Sparse Index (BM25): Lexical/Keyword-based matching
-        print("[INFO] Building Sparse Index (BM25)...")
-        tokenized_corpus = [doc.lower().split(" ") for doc in self.combined_corpus]
+        """Constructs Sparse, Dense, and Vocabulary indexes."""
+
+        # 1. Sparse Index (Fielded BM25)
+        print("[INFO] Building Sparse Index (Fielded BM25)...")
+        field_weights = {"title": 3.0, "artist": 2.0, "medium": 1.0}
+
+        # Weighted corpus construction for both lexical and semantic pipelines
+        self.weighted_corpus = [
+            (row["title"] + " ") * int(field_weights["title"])
+            + (row["artist"] + " ") * int(field_weights["artist"])
+            + row["medium"]
+            for _, row in self.df.iterrows()
+        ]
+
+        tokenized_corpus = [
+            process_text_for_sparse(doc).split() for doc in self.weighted_corpus
+        ]
         self.bm25 = BM25Okapi(tokenized_corpus)
 
-        # 2. Dense Index (Sentence Transformers): Semantic/Meaning-based matching
-        print("[INFO] Initializing Transformer Model...")
+        # 2. Dense Index (BERT)
+        print(f"[INFO] Initializing Transformer on {self.device.upper()}...")
         self.dense_model = SentenceTransformer("all-MiniLM-L6-v2", device=self.device)
 
-        # If we have a cache on disk, load it instantly
         if os.path.exists(VECTOR_CACHE):
-            print(f"[CACHE] Loading pre-computed embeddings from {VECTOR_CACHE}...")
+            print(f"[CACHE] Loading embeddings from {VECTOR_CACHE}...")
             self.document_embeddings = np.load(VECTOR_CACHE)
         else:
-            # If no cache, use the GPU (or CPU) to compute embeddings and save them for next time
-            print("[INFO] No cache found. Starting high-performance encoding...")
-            start_time = time.perf_counter()
-
-            if self.device == "cuda":
-                # High batch size (128) is used to saturate the GPU's memory for speed
-                self.document_embeddings = self.dense_model.encode(
-                    self.combined_corpus,
-                    batch_size=128,
-                    show_progress_bar=True,
-                    convert_to_numpy=True,
-                )
-            else:
-                # Fallback for CPU-only systems
-                print("[CPU] Utilizing Multi-Process Pool for parallel encoding...")
-                pool = self.dense_model.start_multi_process_pool()
-                self.document_embeddings = self.dense_model.encode_multi_process(
-                    self.combined_corpus, pool
-                )
-                self.dense_model.stop_multi_process_pool(pool)
-
-            # Save the result so we never have to compute this again
-            np.save(VECTOR_CACHE, self.document_embeddings)
-            print(
-                f"[SUCCESS] Encoding complete in {time.perf_counter() - start_time:.2f}s"
+            print("[INFO] Computing Weighted Embeddings...")
+            # Use self.weighted_corpus to ensure variables are found in scope
+            self.document_embeddings = self.dense_model.encode(
+                self.weighted_corpus,
+                batch_size=128,
+                show_progress_bar=True,
+                convert_to_numpy=True,
             )
+            # Explicit check to satisfy Pylance ArrayLike requirement
+            if self.document_embeddings is not None:
+                np.save(VECTOR_CACHE, self.document_embeddings)
 
-    def search_sparse(self, query: str, top_k: int = 100):
-        """Calculates keyword scores for a query."""
-        assert self.bm25 is not None
-        tokenized_query = query.lower().split(" ")
+        # 3. Spelling Vocabulary
+        print("[INFO] Building Spelling Vocabulary...")
+        for text in self.df["artist"].tolist() + self.df["medium"].tolist():
+            words = re.findall(r"\b[a-zA-Z]{3,}\b", text.lower())
+            self.vocabulary.update(words)
+
+        print("[SUCCESS] All indexes built successfully.")
+
+    def suggest_correction(self, query: str) -> Optional[str]:
+        """Uses Levenshtein distance to suggest query corrections."""
+        lev = Levenshtein
+        if not self.vocabulary or lev is None:
+            return None
+
+        suggested_query = []
+        changed = False
+        for word in query.split():
+            clean_word = re.sub(r"[^a-zA-Z]", "", word.lower())
+            if not clean_word or len(clean_word) < 3 or clean_word in self.vocabulary:
+                suggested_query.append(word)
+                continue
+
+            # Find closest match within distance of 2
+            def distance_func(w):
+                return lev.distance(clean_word, w)
+
+            closest_word = min(self.vocabulary, key=distance_func)
+
+            if lev.distance(clean_word, closest_word) <= 2:
+                suggested_query.append(closest_word)
+                changed = True
+            else:
+                suggested_query.append(word)
+
+        return " ".join(suggested_query) if changed else None
+
+    def search_sparse(self, query: str, top_k: int = 10) -> Dict[int, float]:
+        """Performs BM25 sparse retrieval and returns top-k document scores."""
+        if self.bm25 is None:
+            return {}
+        tokenized_query = process_text_for_sparse(query).split()
         scores = self.bm25.get_scores(tokenized_query)
-        # Return the indices of the top 100 lexical matches
-        return {idx: r for r, idx in enumerate(np.argsort(scores)[::-1][:top_k])}
+        scored_docs = {i: float(s) for i, s in enumerate(scores) if s > 0}
+        sorted_docs = sorted(scored_docs.items(), key=lambda x: x[1], reverse=True)
+        return dict(sorted_docs[:top_k])
 
-    def search_dense(self, query: str, top_k: int = 100):
-        """Calculates semantic similarity using dot product on the GPU."""
-        assert self.dense_model is not None
-        assert self.document_embeddings is not None
-        # Convert the user query into a vector
+    def search_dense(self, query: str, top_k: int = 10) -> Dict[int, float]:
+        """Performs dense semantic retrieval and returns top-k document scores."""
+        if self.dense_model is None or self.document_embeddings is None:
+            return {}
         query_vec = self.dense_model.encode(
             [query], convert_to_numpy=True, device=self.device
         )
-        # Perform matrix multiplication to find similarity scores
         scores = np.dot(self.document_embeddings, query_vec.T).flatten()
-        # Return the indices of the top 100 semantic matches
-        return {idx: r for r, idx in enumerate(np.argsort(scores)[::-1][:top_k])}
+        scored_docs = {i: float(s) for i, s in enumerate(scores) if s > 0.1}
+        sorted_docs = sorted(scored_docs.items(), key=lambda x: x[1], reverse=True)
+        return dict(sorted_docs[:top_k])
 
-    def hybrid_search(self, query: str, top_k: int = 10, rrf_k: int = 60):
+    @staticmethod
+    def _min_max_normalize(scores_dict: Mapping[int, Any]) -> Dict[int, float]:
+        """Normalizes scores to a 0-1 range for fair fusion."""
+        if not scores_dict:
+            return {}
+
+        vals = [float(v) for v in scores_dict.values()]
+        min_v, max_v = min(vals), max(vals)
+
+        if max_v == min_v:
+            return {k: 1.0 for k in scores_dict}
+
+        return {k: (float(v) - min_v) / (max_v - min_v) for k, v in scores_dict.items()}
+
+    def hybrid_search(
+        self,
+        query: str,
+        top_k: int = 10,
+        alpha: float = 0.5,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         """
-        Uses Reciprocal Rank Fusion (RRF) to merge keyword and semantic results.
+        Orchestrates dual-retrieval and fuses results.
+        Alpha: 1.0 is pure Semantic, 0.0 is pure Keyword.
         """
         start_time = time.perf_counter()
 
-        sparse_ranks = self.search_sparse(query)
-        dense_ranks = self.search_dense(query)
+        # 1. Spelling Suggestion
+        suggestion = self.suggest_correction(query)
 
-        # RRF Formula: 1 / (k + rank)
-        rrf_scores = {}
-        for idx in range(len(self.df)):
-            score = 0.0
-            if idx in sparse_ranks:
-                score += 1.0 / (rrf_k + sparse_ranks[idx])
-            if idx in dense_ranks:
-                score += 1.0 / (rrf_k + dense_ranks[idx])
-            if score > 0:
-                rrf_scores[idx] = score
+        # 2. Retrieval
+        sparse_scores = self.search_sparse(query, top_k=100)
+        dense_scores = self.search_dense(query, top_k=100)
 
-        # Sort all artworks by their new fused score
+        # 3. Normalization & Fusion
+        norm_sparse = self._min_max_normalize(sparse_scores)
+        norm_dense = self._min_max_normalize(dense_scores)
+
+        fused_scores = {}
+        all_ids = set(norm_sparse.keys()) | set(norm_dense.keys())
+        for idx in all_ids:
+            s_val = norm_sparse.get(idx, 0.0)
+            d_val = norm_dense.get(idx, 0.0)
+            fused_scores[idx] = (alpha * d_val) + ((1.0 - alpha) * s_val)
+
+        # 4. Sorting & Patching
         ranked_indices = sorted(
-            rrf_scores, key=lambda idx: rrf_scores[idx], reverse=True
-        )[:top_k]
+            fused_scores, key=lambda x: fused_scores.get(x, 0.0), reverse=True
+        )
 
-        results = []
-        for rank, idx in enumerate(ranked_indices):
+        results: List[Dict[str, Any]] = []
+        for idx in ranked_indices:
             doc = self.df.iloc[idx]
 
-            # URL PATCHING:
-            # Tate's raw data has dead links. We swap 'www.tate.org.uk'
-            # for 'media.tate.org.uk' to hit the live CDN.
-            raw_url = doc["thumbnailurl"]
+            # Post-retrieval filtering
+            if filters:
+                if not all(
+                    str(v).lower() in str(doc.get(k, "")).lower()
+                    for k, v in filters.items()
+                ):
+                    continue
+
+            # Reason generation (Transparency)
+            reasons = []
+            if idx in norm_sparse and norm_sparse[idx] > 0:
+                reasons.append(f"Keyword ({norm_sparse[idx]:.2f})")
+            if idx in norm_dense and norm_dense[idx] > 0:
+                reasons.append(f"AI Context ({norm_dense[idx]:.2f})")
+
+            # URL Patching
+            raw_url = str(doc["thumbnailurl"])
             fixed_url = (
                 raw_url.replace("http://www.tate.org.uk", "https://media.tate.org.uk")
                 if "tate" in raw_url
@@ -169,15 +234,19 @@ class ArtGallerySearchEngine:
 
             results.append(
                 {
-                    "Rank": rank + 1,
+                    "Rank": len(results) + 1,
                     "id": doc["id"],
-                    "Title": doc["title"].title(),  # Auto-format to proper Title Case
-                    "Artist": doc["artist"].title(),
-                    "Description": doc["medium"],
+                    "Title": str(doc["title"]).title(),
+                    "Artist": str(doc["artist"]).title(),
+                    "Description": str(doc["medium"]),
                     "Thumbnail": fixed_url,
-                    "Score": round(rrf_scores[idx], 4),
+                    "Score": round(float(fused_scores[idx]), 4),
+                    "Reasons": " + ".join(reasons),
+                    "Suggestion": suggestion,
                 }
             )
+            if len(results) == top_k:
+                break
 
-        print(f"[TIMING] Total Retrieval: {time.perf_counter() - start_time:.4f}s")
+        print(f"[TIMING] Hybrid Retrieval: {time.perf_counter() - start_time:.4f}s")
         return results

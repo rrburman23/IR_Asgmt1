@@ -37,7 +37,7 @@ class TestArtGallerySearchEngine(unittest.TestCase):
             len(self.engine.df), 0, "Document store must contain records."
         )
         self.assertEqual(
-            len(self.engine.combined_corpus),
+            len(self.engine.weighted_corpus),
             len(self.engine.df),
             "Corpus size mismatch.",
         )
