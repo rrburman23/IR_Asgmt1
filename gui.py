@@ -302,6 +302,11 @@ class ArtSearchGUI(QMainWindow):
         self.display_results(results, query)
         self.status.setText(f"Completed. Found {len(results)} matches.")
 
+        total_items = len(self.engine.df)
+        self.status.setText(
+            f"Search Complete | {total_items} items indexed on {self.engine.device.upper()}"
+        )
+
     def display_results(self, results: list, query: str):
         """
         Converts the raw dictionary results list into formatted HTML tables

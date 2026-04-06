@@ -40,7 +40,7 @@ class ArtGallerySearchEngine:
         # a keyword match in the Title is mathematically more important than
         # a keyword match in the Medium/Description.
         self.combined_corpus = (
-            (self.df["title"] + " ") * 2
+            (self.df["title"] + " ") * 4
             + "by "
             + self.df["artist"]
             + ". Medium: "
