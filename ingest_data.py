@@ -14,6 +14,29 @@ RAW_FILE = "raw_tate_data.csv"
 OUTPUT_FILE = "art_gallery_data.csv"
 
 
+def ensure_data_exists():
+    """
+    Ensures the processed dataset exists. Downloads and processes if missing.
+    """
+    if os.path.exists(OUTPUT_FILE):
+        print(f"[INFO] {OUTPUT_FILE} already exists. Skipping ingestion.")
+        return
+
+    print("[INFO] Dataset not found. Starting ingestion pipeline...")
+    try:
+        download_dataset(DATA_URL, RAW_FILE)
+        process_and_filter(RAW_FILE, OUTPUT_FILE)
+        print("[SUCCESS] Dataset ready.")
+    except (
+        ConnectionError,
+        FileNotFoundError,
+        KeyError,
+        pd.errors.EmptyDataError,
+    ) as e:
+        print(f"[ERROR] Ingestion pipeline failed: {e}")
+        raise
+
+
 def download_dataset(url, filename, timeout=30):
     """
     Downloads the raw CSV dataset with timeout and status validation.

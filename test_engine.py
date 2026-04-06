@@ -37,14 +37,9 @@ class TestArtGallerySearchEngine(unittest.TestCase):
             len(self.engine.df), 0, "Document store must contain records."
         )
         self.assertEqual(
-            len(self.engine.sparse_corpus),
+            len(self.engine.combined_corpus),
             len(self.engine.df),
-            "Sparse corpus size mismatch.",
-        )
-        self.assertEqual(
-            len(self.engine.dense_corpus),
-            len(self.engine.df),
-            "Dense corpus size mismatch.",
+            "Corpus size mismatch.",
         )
 
     def test_indexes_built(self):
@@ -59,7 +54,7 @@ class TestArtGallerySearchEngine(unittest.TestCase):
             "Dense document embedding generation failed.",
         )
         self.assertEqual(
-            len(self.engine.document_embeddings),
+            len(self.engine.document_embeddings),  # type: ignore
             len(self.engine.df),
             "Embedding count mismatch.",
         )
