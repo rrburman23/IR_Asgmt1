@@ -2,9 +2,10 @@
 File Name: gui.py
 Description: Provides the PyQt6 graphical user interface for the Tate Gallery
              Search Engine. Implements background loading, memory caching for
-             images, transparency reporting, and spelling suggestions.
+             images, transparency reporting, and clickable spelling suggestions.
 """
 
+import time
 import base64
 import urllib.parse
 import requests
@@ -22,11 +23,11 @@ from PyQt6.QtWidgets import (
     QLabel,
     QListWidget,
 )
+
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from hybrid_search import ArtGallerySearchEngine
 from ingest_data import OUTPUT_FILE
-
 
 # ==========================================
 # 1. Background Worker Thread
@@ -38,6 +39,7 @@ class EngineLoadThread(QThread):
     error_occurred = pyqtSignal(str)
 
     def run(self):
+        """Standard QThread execution method."""
         try:
             engine = ArtGallerySearchEngine(OUTPUT_FILE)
             self.engine_ready.emit(engine)
@@ -52,6 +54,7 @@ class ArtSearchGUI(QMainWindow):
     """The main window class. Renders rich HTML results with transparency."""
 
     def __init__(self):
+        """Initializes the GUI and triggers background model loading."""
         super().__init__()
         self.setWindowTitle("Tate Gallery | Semantic Search")
         self.resize(1150, 800)
@@ -73,6 +76,7 @@ class ArtSearchGUI(QMainWindow):
         self.engine_thread.start()
 
     def apply_modern_styling(self):
+        """Defines the CSS-like Dark Mode aesthetic for all widgets."""
         self.setStyleSheet("""
             QMainWindow { background-color: #0f0f0f; }
             QWidget { font-family: 'Segoe UI', sans-serif; color: #ccc; }
@@ -102,6 +106,7 @@ class ArtSearchGUI(QMainWindow):
         """)
 
     def _setup_sidebar(self):
+        """Initializes the left-hand sidebar for search history tracking."""
         sidebar = QVBoxLayout()
         sidebar.setContentsMargins(0, 0, 10, 0)
         lbl = QLabel("SEARCH HISTORY")
@@ -120,6 +125,7 @@ class ArtSearchGUI(QMainWindow):
         self.main_layout.addLayout(sidebar)
 
     def _setup_main_area(self):
+        """Initializes the search input and HTML result viewing area."""
         content = QVBoxLayout()
         nav = QHBoxLayout()
         self.search_input = QLineEdit()
@@ -131,25 +137,39 @@ class ArtSearchGUI(QMainWindow):
         nav.addWidget(btn_search)
         self.status = QLabel("Initializing...")
         self.status.setStyleSheet("color: #f39c12;")
+
         self.results_area = QTextBrowser()
+        self.results_area.setOpenLinks(False)
+        self.results_area.anchorClicked.connect(self._on_suggestion_clicked)
+
         content.addLayout(nav)
         content.addWidget(self.status)
         content.addWidget(self.results_area)
         self.main_layout.addLayout(content)
 
     def _on_engine_ready(self, engine):
+        """Slot for handling engine initialization completion."""
         self.engine = engine
         self.status.setText("Engine Online - Ready for Queries!")
         self.status.setStyleSheet("color: #2ecc71;")
 
     def _on_history_clicked(self, item):
+        """Populates the search bar with historical text and re-searches."""
         self.search_input.setText(item.text())
         self.perform_search()
 
+    def _on_suggestion_clicked(self, qurl):
+        """Slot to intercept clicks on 'Did you mean' links."""
+        suggested_query = qurl.toString()
+        self.search_input.setText(suggested_query)
+        self.perform_search()
+
     def clear_history(self):
+        """Wipes the interaction history sidebar."""
         self.history_list.clear()
 
     def _get_img_b64(self, url: str, title: str):
+        """Fetches and encodes images to Base64 to bypass local file restrictions."""
         if url in self.image_cache:
             return self.image_cache[url]
         b64 = None
@@ -171,12 +191,11 @@ class ArtSearchGUI(QMainWindow):
         return b64
 
     def perform_search(self):
-        """Executes search and handles slash commands."""
+        """Routes search execution and handles administrative slash commands."""
         query = self.search_input.text().strip()
         if not query or self.engine is None:
             return
 
-        # Slash Commands
         if query.lower() in ["/test", "test", "/evaluate", "evaluate", "/eval"]:
             self.status.setText("Running System Task... Check Terminal")
             self.status.setStyleSheet("color: #3498db;")
@@ -193,55 +212,76 @@ class ArtSearchGUI(QMainWindow):
             self.search_input.clear()
             return
 
-        # History Management
+        # Safely check for None when accessing list items
         existing = []
         for i in range(self.history_list.count()):
             item = self.history_list.item(i)
             if item is not None:
                 existing.append(item.text())
+
         if query not in existing:
             self.history_list.insertItem(0, query)
 
-        # Execute Search
+        # Execute Search with a local timer to measure performance and provide user feedback
+        search_start = time.perf_counter()
         results = self.engine.hybrid_search(query)
-        self.display_results(results, query)
+        search_end = time.perf_counter()
+        search_time = search_end - search_start
 
-        # NEW: Show Hardware and Item Count in Status Bar
+        # Pass the time to the display function
+        self.display_results(results, query, search_time)
+
+        # Update Status Bar
         total_items = len(self.engine.df)
+
         self.status.setText(
-            f"Search Complete | {total_items} items indexed on {self.engine.device.upper()}"
+            f"Complete | {total_items} items indexed on {self.engine.device.upper()}"
         )
         self.status.setStyleSheet("color: #2ecc71;")
 
-    def display_results(self, results: list, query: str):
-        """Renders HTML with Match Logic and Spelling Suggestions."""
-        # 1. Handle Spelling Suggestion
+    def display_results(self, results: list, query: str, search_time: float = 0.0):
+        """Renders the HTML result cards and clickable suggestions into the display area."""
         suggestion_html = ""
         if results and results[0].get("Suggestion"):
             sug = results[0]["Suggestion"]
-            suggestion_html = f"<div style='color:#f39c12; margin-bottom:10px;'><i>Did you mean: <b>{sug}</b>?</i></div>"
+            suggestion_html = (
+                f"<div style='color:#f39c12; margin-bottom:10px;'>"
+                f"<i>Did you mean: <a href='{sug}' style='color:#3498db; "
+                f"text-decoration:none;'><b>{sug}</b></a>?</i></div>"
+            )
+        # Inject the search time into the header for user feedback on performance
+        html = (
+            f"{suggestion_html}"
+            f"<h2 style='color:white; margin-bottom:10px;'>"
+            f"Results: '{query}' "
+            f"<span style='color:#888; font-size:14px; font-weight:normal;'>"
+            f"({search_time:.3f} seconds)</span></h2><hr>"
+        )
 
-        html = f"{suggestion_html}<h2 style='color:white; margin-bottom:10px;'>Results: '{query}'</h2><hr>"
-
-        # 2. Render Artwork Cards
         for res in results:
             b64 = self._get_img_b64(res["Thumbnail"], res["Title"])
+
+            # Break long string to satisfy character limit
+            img_part = f"src='data:image/jpeg;base64,{b64}'" if b64 else ""
             img_html = (
-                f"<img src='data:image/jpeg;base64,{b64}' width='140' style='border-radius:4px;'/>"
+                f"<img {img_part} width='140' style='border-radius:4px;'/>"
                 if b64
                 else "[No Image]"
             )
 
-            html += (
-                "<table width='100%' style='margin-bottom:15px'><tr>"
-                + f"<td width='160' valign='top'>{img_html}</td>"
-                + "<td valign='top'>"
-                + f"<b style='color:#3498db; font-size:18px'>{res['Rank']}. {res['Title']}</b><br>"
-                + f"<span style='color:#ecf0f1; font-size:14px'>Artist: {res['Artist']}</span><br>"
-                + f"<i style='color:#666; font-size:13px; margin-top:5px;'>{res['Description']}</i><br>"
-                # NEW: Match Logic Transparency Tag
-                + f"<div style='color:#2ecc71; font-size:11px; margin-top:5px;'><b>Match Logic:</b> {res['Reasons']}</div>"
-                + f"<span style='color:#444; font-size:11px;'>Relevance Score: {res['Score']}</span></td>"
-                + "</tr></table><hr style='border:none; border-top:1px solid #222;'>"
+            # Assemble rows with shorter concatenation to keep lines under 100
+            row = "<table width='100%' style='margin-bottom:15px'><tr>"
+            row += f"<td width='160' valign='top'>{img_html}</td>"
+            row += "<td valign='top'>"
+            row += f"<b style='color:#3498db; font-size:18px'>{res['Rank']}. {res['Title']}</b><br>"
+            row += f"<span style='color:#ecf0f1; font-size:14px'>Artist: {res['Artist']}</span><br>"
+            row += (
+                f"<i style='color:#666; font-size:13px;'>{res['Description']}</i><br>"
             )
+            row += "<div style='color:#2ecc71; font-size:11px; margin-top:5px;'>"
+            row += f"<b>Match Logic:</b> {res['Reasons']}</div>"
+            row += f"<span style='color:#444; font-size:11px;'>Score: {res['Score']}</span></td>"
+            row += "</tr></table><hr style='border:none; border-top:1px solid #222;'>"
+            html += row
+
         self.results_area.setHtml(html)
