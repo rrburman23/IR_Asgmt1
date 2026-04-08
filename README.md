@@ -18,10 +18,11 @@ This repository contains the codebase for Assignment 1 (Information Retrieval EC
 ## Architecture Overview
 
 - Sparse indexing: `rank_bm25` over title/artist fields for known-item lookup.
-- Dense indexing: `sentence-transformers` (`multi-qa-MiniLM-L6-cos-v1`) for semantic retrieval.
+- Dense indexing: `sentence-transformers` (`all-MiniLM-L6-v2`) for semantic retrieval.
 - Fusion: Reciprocal Rank Fusion (RRF).
 - Curator boost: optional business weighting to promote finalized masterpieces and demote archival fragments.
 - Interfaces: PyQt6 GUI and CLI, with ETL, tests, and evaluation scripts.
+- Pagination: results are served in pages with Previous/Next navigation controls in the GUI.
 
 ## Logical System Architecture
 

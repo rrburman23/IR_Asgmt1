@@ -2,15 +2,15 @@
 File Name: gui.py
 Description: PyQt6 GUI for Art Search.
 - Layout: Clean Div-based Hierarchy (Name -> Artist -> Medium -> Description).
+- Supports server-side pagination and spelling suggestion.
 """
 
 import sys
 import time
 import base64
 import requests
-from typing import List
+from typing import List, Optional
 
-# pylint: disable=no-name-in-module
 from PyQt6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -52,6 +52,13 @@ class ArtSearchGUI(QMainWindow):
         self.resize(1150, 800)
         self.engine = None
         self.image_cache: dict[str, str] = {}
+
+        # Pagination state
+        self.current_query = ""
+        self.current_page = 1
+        self.per_page = 10
+        self.total_pages = 1
+
         self.apply_styling()
         self.setWindowIcon(QIcon("icon.png"))
 
@@ -74,20 +81,24 @@ class ArtSearchGUI(QMainWindow):
         self.setStyleSheet("""
             QMainWindow { background-color: #0f0f0f; }
             QWidget { font-family: 'Segoe UI', sans-serif; color: #ccc; }
-            QLineEdit { 
-                padding: 12px; border-radius: 8px; 
-                background: #1a1a1a; color: white; border: 1px solid #333; 
+            QLineEdit {
+                padding: 12px; border-radius: 8px;
+                background: #1a1a1a; color: white; border: 1px solid #333;
                 font-size: 14px;
             }
-            QPushButton { 
-                padding: 12px; border-radius: 8px; 
-                background: #2980b9; color: white; font-weight: bold; 
+            QPushButton {
+                padding: 12px; border-radius: 8px;
+                background: #2980b9; color: white; font-weight: bold;
             }
             QPushButton:hover { background: #3498db; }
-            QPushButton#clearBtn { 
+            QPushButton#clearBtn {
                 background: #222; color: #888; font-size: 11px; margin-top: 5px;
             }
             QPushButton#clearBtn:hover { background: #e74c3c; color: white; }
+            QPushButton#navBtn {
+                background: #191970; color: #fff; font-size: 11px; padding: 5px 12px;
+            }
+            QPushButton#navBtn:disabled { background: #222; color: #888; }
             QTextBrowser { background: #141414; border: 1px solid #222; border-radius: 8px; }
             QListWidget { background: #1a1a1a; border: none; border-radius: 8px; }
             QListWidget::item { padding: 10px; border-bottom: 1px solid #222; }
@@ -101,15 +112,12 @@ class ArtSearchGUI(QMainWindow):
         lbl.setStyleSheet(
             "font-weight: bold; color: #555; font-size: 11px; margin-bottom: 5px;"
         )
-
         self.history_list = QListWidget()
         self.history_list.itemClicked.connect(self._on_history_clicked)
         self.history_list.setFixedWidth(220)
-
         self.btn_clear = QPushButton("Clear History")
         self.btn_clear.setObjectName("clearBtn")
         self.btn_clear.clicked.connect(self.clear_history)
-
         sidebar.addWidget(lbl)
         sidebar.addWidget(self.history_list)
         sidebar.addWidget(self.btn_clear)
@@ -117,6 +125,7 @@ class ArtSearchGUI(QMainWindow):
 
     def _setup_main_area(self):
         content = QVBoxLayout()
+
         nav = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search the archives or type /help...")
@@ -135,7 +144,33 @@ class ArtSearchGUI(QMainWindow):
         content.addLayout(nav)
         content.addWidget(self.status)
         content.addWidget(self.results_area)
+
+        # Add paging area at the bottom
+        self.nav_area = QHBoxLayout()
+        self.btn_prev = QPushButton("Previous")
+        self.btn_prev.setObjectName("navBtn")
+        self.btn_prev.clicked.connect(self.go_to_prev_page)
+        self.btn_next = QPushButton("Next")
+        self.btn_next.setObjectName("navBtn")
+        self.btn_next.clicked.connect(self.go_to_next_page)
+        self.btn_prev.setMinimumWidth(110)
+        self.btn_next.setMinimumWidth(110)
+        self.label_page = QLabel("Page 1 of 1")
+        self.label_page.setStyleSheet(
+            "color:#8ecaf7; font-size:13px; font-weight:bold; margin:0 12px;"
+        )
+        self.nav_area.addStretch(1)
+        self.nav_area.addWidget(self.btn_prev)
+        self.nav_area.addWidget(self.label_page)
+        self.nav_area.addWidget(self.btn_next)
+        self.nav_area.addStretch(1)
+        self.nav_area.setSpacing(12)
+        self.nav_area.setContentsMargins(0, 8, 0, 0)
+
+        content.addLayout(self.nav_area)
+
         self.main_layout.addLayout(content)
+        self.update_nav_controls(reset=True)
 
     def _on_engine_ready(self, engine):
         self.engine = engine
@@ -151,23 +186,51 @@ class ArtSearchGUI(QMainWindow):
     def _on_history_clicked(self, item):
         if item is not None:
             self.search_input.setText(item.text())
-            self.perform_search()
+            self.current_query = item.text()
+            self.current_page = 1
+            self._run_search_and_display()
 
     def _on_suggestion_clicked(self, qurl: QUrl):
         url_str = qurl.toString()
         if url_str.startswith("img::"):
-            # Open thumbnail in browser
-            image_url = url_str[5:]  # strip the "img::" prefix
-            QDesktopServices.openUrl(QUrl(image_url))
+            QDesktopServices.openUrl(QUrl(url_str[5:]))
         else:
-            # Spelling suggestion — re-run search
             self.search_input.setText(url_str)
-            self.perform_search()
+            self.current_query = url_str
+            self.current_page = 1
+            self._run_search_and_display()
 
     def clear_history(self):
         self.history_list.clear()
 
-    def _get_img_b64(self, url: str) -> str | None:
+    def update_nav_controls(self, reset: bool = False):
+        need_paging = self.total_pages > 1
+        self.btn_prev.setDisabled(self.current_page <= 1 or not need_paging)
+        self.btn_next.setDisabled(
+            self.current_page >= self.total_pages or not need_paging
+        )
+        self.label_page.setText(
+            f"Page {self.current_page} of {self.total_pages}" if need_paging else ""
+        )
+        # Hide or show the paging controls as appropriate
+        self.btn_prev.setVisible(need_paging)
+        self.btn_next.setVisible(need_paging)
+        self.label_page.setVisible(need_paging)
+        if reset:
+            self.current_page = 1
+            self.total_pages = 1
+
+    def go_to_next_page(self):
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+            self._run_search_and_display()
+
+    def go_to_prev_page(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self._run_search_and_display()
+
+    def _get_img_b64(self, url: str) -> Optional[str]:
         if not url or len(url) < 10:
             return None
         if url in self.image_cache:
@@ -231,31 +294,59 @@ class ArtSearchGUI(QMainWindow):
             )
             return
 
-        existing: List[str] = []
+        # Search history logic
+        existing = []
         for i in range(self.history_list.count()):
-            hist_item = self.history_list.item(i)
-            if hist_item is not None:
-                existing.append(hist_item.text())
-
+            item = self.history_list.item(i)
+            if item is not None:
+                existing.append(item.text())
         if query not in existing:
             self.history_list.insertItem(0, query)
 
-        start = time.perf_counter()
-        results = self.engine.hybrid_search(query)
-        duration = time.perf_counter() - start
-        self.display_results(results, query, duration)
+        self.current_query = query
+        self.current_page = 1  # Reset to page 1 for new search
+        self._run_search_and_display()
 
-    def display_results(self, results: list, query: str, duration: float):
+    def _run_search_and_display(self):
+        if not self.engine or not self.current_query:
+            return
+        start = time.perf_counter()
+        data = self.engine.hybrid_search(
+            self.current_query,
+            page=self.current_page,
+            per_page=self.per_page,
+        )
+        duration = time.perf_counter() - start
+        self.total_pages = data.get("total_pages", 1)
+        self.update_nav_controls(reset=False)
+        self.display_results(
+            data.get("results", []),
+            self.current_query,
+            duration,
+            self.current_page,
+            self.total_pages,
+            data.get("suggestion"),
+        )
+
+    def display_results(
+        self,
+        results: List[dict],
+        query: str,
+        duration: float,
+        page: int,
+        total_pages: int,
+        suggestion: Optional[str],
+    ):
         suggestion_html = ""
-        if results and results[0].get("Suggestion"):
-            sug = results[0]["Suggestion"]
+        if suggestion:
             suggestion_html = (
                 f"<div style='color:#f39c12; margin-bottom:10px;'>"
-                f"Did you mean: <a href='{sug}' style='color:#3498db; text-decoration:none;'><b>{sug}</b></a>?</div>"
+                f"Did you mean: <a href='{suggestion}' style='color:#3498db; text-decoration:none;'><b>{suggestion}</b></a>?</div>"
             )
-
-        html = f"{suggestion_html}<h2 style='color:white;'>Results: '{query}' ({duration:.3f}s)</h2><hr>"
-
+        html = (
+            f"{suggestion_html}"
+            f"<h2 style='color:white;'>Results: '{query}' (Page {page} of {total_pages}, {duration:.3f}s)</h2><hr>"
+        )
         for res in results:
             thumb_url = res["Thumbnail"]
             b64 = self._get_img_b64(thumb_url)
@@ -264,30 +355,24 @@ class ArtSearchGUI(QMainWindow):
             else:
                 img_html = "<div style='width:140px; height:100px; background:#222; border-radius:4px; text-align:center; padding-top:40px; color:#555;'>No Image</div>"
 
-            # DIV-BASED HIERARCHY (Clean Spacing)
             row = "<table width='100%' style='margin-bottom:20px;'><tr>"
             row += f"<td width='160' valign='top'>{img_html}</td>"
             row += "<td valign='top'>"
 
-            # Title & Year
             year_str = (
                 f" ({res['Year']})"
                 if res["Year"] and res["Year"] != "Unknown Date"
                 else ""
             )
-
-            row += f"<div style='font-size:18px; font-weight:bold; margin-bottom:2px;'><a href='img::{thumb_url}' style='color:#3498db; text-decoration:none;'>{res['Title']}</a><span style='color:#7f8c8d; font-size:14px; font-weight:normal;'>{year_str}</span></div>"
-
-            # Artist
+            row += (
+                f"<div style='font-size:18px; font-weight:bold; margin-bottom:2px;'>"
+                f"<a href='img::{thumb_url}' style='color:#3498db; text-decoration:none;'>{res['Title']}</a>"
+                f"<span style='color:#7f8c8d; font-size:14px; font-weight:normal;'>{year_str}</span></div>"
+            )
             row += f"<div style='color:#ecf0f1; font-size:15px; font-weight:bold; margin-bottom:4px;'>{res['Artist']}</div>"
-
-            # Medium
             row += f"<div style='color:#f1c40f; font-size:13px; font-style:italic; margin-bottom:6px;'>{res['Medium']}</div>"
-
-            # Description
             row += f"<div style='color:#cccccc; font-size:13px; margin-bottom:6px;'>{res['Description']}</div>"
 
-            # Dimensions & Credit
             meta = []
             if res.get("Dimensions") and "Unavailable" not in res["Dimensions"]:
                 meta.append(res["Dimensions"])
@@ -296,7 +381,6 @@ class ArtSearchGUI(QMainWindow):
             if meta:
                 row += f"<div style='color:#7f8c8d; font-size:11px; margin-bottom:8px;'>{' | '.join(meta)}</div>"
 
-            # Match Logic
             row += f"<div style='color:#2ecc71; font-size:11px;'><b>Match:</b> {res['Reasons']} &nbsp;|&nbsp; <b>RRF Score:</b> {res['Score']}</div>"
             row += (
                 "</td></tr></table><hr style='border:none; border-top:1px solid #222;'>"
@@ -304,3 +388,11 @@ class ArtSearchGUI(QMainWindow):
             html += row
 
         self.results_area.setHtml(html)
+        self.label_page.setText(f"Page {page} of {total_pages}")
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = ArtSearchGUI()
+    window.show()
+    sys.exit(app.exec())

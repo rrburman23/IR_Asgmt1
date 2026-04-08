@@ -5,6 +5,8 @@ Description: Evaluation suite for dual-index hybrid retrieval.
 """
 
 import time
+from typing import Any
+
 import numpy as np
 import pandas as pd
 from hybrid_search import ArtGallerySearchEngine
@@ -30,7 +32,7 @@ def calculate_mrr(ranked_ids: list, target_ids: list) -> float:
 
 
 def calculate_concept_ndcg(
-    retrieved_docs: list, relevant_concepts: list, k: int = 10
+    retrieved_docs: list[dict[str, Any]], relevant_concepts: list[str], k: int = 10
 ) -> float:
     dcg = 0.0
     for i, doc in enumerate(retrieved_docs[:k]):
@@ -145,7 +147,8 @@ def run_evaluation(
 
         start = time.perf_counter()
         user_query = query.replace("-", " ").replace(" on rock", " on a rock")
-        results = engine.hybrid_search(user_query, top_k=top_k, k_rrf=k_rrf)
+        search_response = engine.hybrid_search(user_query, top_k=top_k, k_rrf=k_rrf)
+        results = search_response.get("results", [])
         qlat = (time.perf_counter() - start) * 1000
         latencies.append(qlat)
 
@@ -174,7 +177,8 @@ def run_evaluation(
     print(color_text("\nPhase 2: Semantic Discovery (NDCG@10)", "bold"))
     for query, concepts in semantic_qrels.items():
         start = time.perf_counter()
-        results = engine.hybrid_search(query, top_k=top_k, k_rrf=k_rrf)
+        search_response = engine.hybrid_search(query, top_k=top_k, k_rrf=k_rrf)
+        results = search_response.get("results", [])
         qlat = (time.perf_counter() - start) * 1000
         latencies.append(qlat)
 

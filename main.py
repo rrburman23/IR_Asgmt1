@@ -81,13 +81,15 @@ def launch_cli():
                     continue
 
                 # Standard Search (if no slash)
-                results = engine.hybrid_search(query, top_k=5)
+                response = engine.hybrid_search(query, top_k=5, page=1, per_page=5)
+                results = response.get("results", [])
                 if not results:
                     print("[INFO] No matching artworks found.")
                     continue
 
-                if results[0].get("Suggestion"):
-                    print(f"\n[!] Did you mean: '{results[0]['Suggestion']}'?")
+                suggestion = response.get("suggestion")
+                if suggestion:
+                    print(f"\n[!] Did you mean: '{suggestion}'?")
 
                 print(f"\n--- TOP {len(results)} RESULTS ---")
                 for res in results:
