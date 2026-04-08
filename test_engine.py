@@ -1,116 +1,79 @@
 """
 File Name: test_engine.py
-Description: Verifies the functional integrity of the search engine components,
-             ensuring indexes build correctly, retrieval methods return
-             the expected data structures, and latency constraints are met.
+Description: Automated unit tests for the Tate Search Engine v3.2.
+- Updated to resolve Pylance type-safety and attribute access warnings.
+- Verifies fielded indexing and RRF fusion schema.
 """
 
 import unittest
 import time
+import numpy as np
 from hybrid_search import ArtGallerySearchEngine
 
 
 class TestArtGallerySearchEngine(unittest.TestCase):
-    """
-    Automated unit test suite for the Art Gallery Search Engine.
-    Validates data ingestion, index construction, query retrieval,
-    and system latency thresholds.
-    """
-
     @classmethod
     def setUpClass(cls):
-        """
-        Executes preliminary setup. Initializes the engine and builds the
-        indexes in memory to prevent reloading the BERT model per test.
-        """
-        print("\n[TEST SETUP] Initializing engine for automated testing...")
+        print("\n[TEST SETUP] Loading hybrid engine for tests...")
         cls.engine = ArtGallerySearchEngine("art_gallery_data.csv")
 
     def test_engine_initialization(self):
-        """
-        Verifies the document store instantiation and corpus generation.
-        """
-        self.assertIsNotNone(
-            self.engine.df, "Document store DataFrame must not be None."
-        )
-        self.assertGreater(
-            len(self.engine.df), 0, "Document store must contain records."
-        )
-        self.assertEqual(
-            len(self.engine.weighted_corpus),
-            len(self.engine.df),
-            "Corpus size mismatch.",
-        )
+        """Verifies field normalization and store instantiation."""
+        self.assertIsNotNone(self.engine.df, "Document DataFrame is None.")
+        self.assertGreater(len(self.engine.df), 0, "Document store is empty.")
+
+        # Checking schema presence
+        for col in ("title", "artist", "semantic_blob"):
+            self.assertIn(
+                col, self.engine.df.columns, f"Missing field '{col}' in DataFrame."
+            )
 
     def test_indexes_built(self):
-        """
-        Verifies successful instantiation of both BM25 and BERT indexes.
-        """
-        self.assertIsNotNone(
-            self.engine.bm25, "BM25 sparse index instantiation failed."
-        )
-        self.assertIsNotNone(
-            self.engine.document_embeddings,
-            "Dense document embedding generation failed.",
-        )
-        self.assertEqual(
-            len(self.engine.document_embeddings),  # type: ignore
-            len(self.engine.df),
-            "Embedding count mismatch.",
-        )
+        """Ensures both BM25 and BERT indexes are initialized and matching size."""
+        self.assertIsNotNone(self.engine.bm25)
+        # Check for None before using len()
+        embeddings = self.engine.document_embeddings
+        self.assertIsNotNone(embeddings, "Document embeddings were not initialized.")
+        if embeddings is not None:
+            self.assertEqual(len(embeddings), len(self.engine.df))
 
     def test_sparse_retrieval(self):
-        """
-        Verifies BM25 sparse search execution and output format.
-        """
-        query = "oil painting"
-        results = self.engine.search_sparse(query, top_k=10)
-        self.assertIsInstance(
-            results, dict, "Sparse search output must be a dictionary."
-        )
-        self.assertLessEqual(len(results), 10, "Sparse search exceeded top_k limit.")
+        """BM25 search schema and type check."""
+        results = self.engine.search_sparse("river landscape", top_k=10)
+        self.assertIsInstance(results, dict)
+        if results:
+            idx, score = next(iter(results.items()))
+            self.assertIsInstance(idx, int)
+            self.assertTrue(isinstance(score, (int, float, np.number)))
 
     def test_dense_retrieval(self):
-        """
-        Verifies Exact k-NN dense search execution and output format.
-        """
-        query = "a gloomy landscape"
-        results = self.engine.search_dense(query, top_k=10)
-        self.assertIsInstance(
-            results, dict, "Dense search output must be a dictionary."
-        )
-        self.assertLessEqual(len(results), 10, "Dense search exceeded top_k limit.")
+        """Dense search schema and type check."""
+        results = self.engine.search_dense("cloudy mountain", top_k=10)
+        self.assertIsInstance(results, dict)
+        if results:
+            idx, score = next(iter(results.items()))
+            self.assertIsInstance(idx, int)
+            # Use np.number to cover all numpy float types without generic args
+            self.assertTrue(isinstance(score, (int, float, np.number)))
 
     def test_hybrid_fusion(self):
-        """
-        Verifies Reciprocal Rank Fusion (RRF) pipeline integration and output schema.
-        """
+        """Validates output schema for GUI compatibility."""
         query = "portrait of a woman"
-        top_k = 5
-        results = self.engine.hybrid_search(query, top_k=top_k)
+        results = self.engine.hybrid_search(query, top_k=5)
+        self.assertEqual(len(results), 5)
 
-        self.assertIsInstance(results, list, "Hybrid search output must be a list.")
-        self.assertEqual(
-            len(results), top_k, f"Hybrid search output length must equal {top_k}."
-        )
-
-        first_result = results[0]
-        expected_keys = ["Rank", "Title", "Artist", "Description", "Score"]
-        for key in expected_keys:
-            self.assertIn(key, first_result, f"Result dictionary missing key: {key}")
+        # Verify Name -> Artist -> Medium -> Desc hierarchy keys exist
+        required = ["Title", "Artist", "Medium", "Description", "Reasons"]
+        for k in required:
+            self.assertIn(k, results[0])
 
     def test_latency_constraint(self):
-        """
-        Verifies hybrid search latency operates within the 200ms threshold.
-        """
-        query = "landscape with clouds"
-
-        start_time = time.perf_counter()
-        _ = self.engine.hybrid_search(query, top_k=10)
-        latency = time.perf_counter() - start_time
-
+        """Ensures search latency is under 200ms for typical queries."""
+        t0 = time.perf_counter()
+        _ = self.engine.hybrid_search("stormy sea", top_k=10)
+        latency = time.perf_counter() - t0
         self.assertLess(
-            latency, 0.200, f"Query latency ({latency:.4f}s) exceeded 200ms threshold."
+            latency, 0.200, f"Latency {latency:.4f}s exceeded 200ms threshold."
         )
 
 

@@ -1,26 +1,30 @@
 # Art Gallery Hybrid Search Engine
 
-This repository contains the codebase for Assignment 1 (Information Retrieval ECS736P/U). It implements a dual-pipeline search engine designed for a curated corpus of 2,000 art gallery documents.
+This repository contains the codebase for Assignment 1 (Information Retrieval ECS736P/U). It implements a **dual-pipeline search engine** for a curated corpus of Tate Gallery artwork, matching real-world IR architectures (fielded sparse, dense encoder, and RRF fusion).
+
+---
 
 ## Project Structure
 
 ```text
 .
-├── ingest_data.py        # ETL pipeline
-├── hybrid_search.py      # Core hybrid search engine (BM25 + dense vectors + RRF)
-├── main.py               # Interactive CLI entry point (auto-ETL)
-├── evaluate_engine.py    # Evaluation metrics (MRR, NDCG@10)
-├── test_engine.py        # Unit tests for engine functionality and latency
-├── requirements.txt      # Python dependencies
-└── art_gallery_data.csv  # Generated local document store
+├── ingest_data.py        # ETL pipeline (download, clean, normalize CSV)
+├── hybrid_search.py      # Core search engine: BM25 (title/artist), Dense (medium/desc), RRF fusion
+├── main.py               # GUI/CLI entry point, auto-ingest, mode router
+├── evaluate_engine.py    # Evaluation (MRR, NDCG@10)
+├── test_engine.py        # Unit/latency tests
+├── requirements.txt      # Python dependencies (CPU & CUDA compatible)
+└── art_gallery_data.csv  # Local search-ready dataset
 ```
 
-## Architecture Highlights
+## Architecture Overview
 
-- **Sparse Indexing:** Uses `Rank-BM25` to index artwork titles and artists for exact known-item matching.
-- **Dense Indexing:** Uses `sentence-transformers` (`all-MiniLM-L6-v2`) to embed artwork descriptions, facilitating semantic search via Exact k-NN cosine similarity.
-- **Fusion:** Implements Reciprocal Rank Fusion (RRF) to blend lexical and semantic scores.
-- **Automated Bootstrap:** A central orchestrator manages data ingestion and system initialization.
+- **Sparse Indexing:** [`rank_bm25`](https://github.com/dorianbrown/rank_bm25) on artwork titles & artists for exact/known-item lookup.
+- **Dense Indexing:** [`sentence-transformers`](https://www.sbert.net/) (default: `"multi-qa-MiniLM-L6-cos-v1"`) for fast semantic search on artwork descriptions/medium.
+- **Fusion:** [Reciprocal Rank Fusion (RRF)](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf).
+- **Full stack:** CLI and PyQt6 GUI, with automated ETL, tests, and benchmarking.
+
+---
 
 ## Logical System Architecture
 
@@ -31,22 +35,19 @@ This repository contains the codebase for Assignment 1 (Information Retrieval EC
                                       │
 ┌───────────────────────┐             ▼             ┌───────────────────────┐
 │  Remote Data Source   │──────────────────────────▶│    ingest_data.py     │
-│  (GitHub CSV File)    │                           │ (ETL & Normalization) │
-└───────────────────────┘                           └───────────┬───────────┘
-                                                                │
-                                                                ▼
-                                                    ┌───────────────────────┐
-                                                    │    Document Store     │
-                                                    │ (art_gallery_data.csv)│
-                                                    └─────┬───────────┬─────┘
-                                                          │           │
-                               ┌──────────────────────────┘           └──────────────────────────┐
-                               ▼                                                                 ▼
-                 ┌───────────────────────────┐                                     ┌───────────────────────────┐
-                 │   Sparse Index Builder    │                                     │    Dense Index Builder    │
-                 │   Model: BM25Okapi        │                                     │   Model: MiniLM-L6-v2     │
-                 │   Target: Title, Artist   │                                     │   Target: Description     │
-                 └───────────────────────────┘                                     └───────────────────────────┘
+│  (GitHub CSV File)    │                           │    (ETL/clean)        │
+└───────────────────────┘                           └───────┬─────┬─────────┘
+                                                            │     │
+                                  ┌─────────────────────────┘     └─────────────────────────┐
+                                  ▼                                                 ▼
+                    ┌─────────────────────────┐                        ┌─────────────────────────┐
+                    │  BM25 Index (title/artist)│                      │ Dense Index (desc/medium)│
+                    └─────────────────────────┘                        └─────────────────────────┘
+                                  └─────────────────────────┬───────────┬──────────────────┘
+                                                            ▼           ▼
+                                                    ┌────────────────────────┐
+                                                    │  art_gallery_data.csv  │
+                                                    └────────────────────────┘
 
 ===============================================================================================================
 
@@ -55,61 +56,81 @@ This repository contains the codebase for Assignment 1 (Information Retrieval EC
 └─────────────────────────────────────────────────────────────────────────────┘
                                       │
                                       ▼
-                          ┌───────────────────────┐
-                          │    User Interface     │
-                          │   (Interactive CLI)   │
-                          └───────────┬───────────┘
-                                      │
-                                      ▼
-                          ┌───────────────────────┐
-                          │    Query Processor    │
-                          │  (Tokenize / Embed)   │
-                          └─────┬───────────┬─────┘
-                                │           │
-              ┌─────────────────┘           └─────────────────┐
-              ▼                                               ▼
-┌───────────────────────────┐                   ┌───────────────────────────┐
-│     Lexical Retrieval     │                   │    Semantic Retrieval     │
-│    (Exact Term Match)     │                   │   (Exact k-NN Cosine)     │
-└─────────────┬─────────────┘                   └─────────────┬─────────────┘
-              │                                               │
-              └───────────────────────┬───────────────────────┘
-                                      ▼
-                          ┌───────────────────────┐
-                          │  Fusion Orchestrator  │
-                          │ (Reciprocal Rank      │
-                          │  Fusion, k=60)        │
-                          └───────────┬───────────┘
-                                      │
-                                      ▼
-                          ┌───────────────────────┐
-                          │  Presentation Layer   │
-                          │   (Formatted Top-K)   │
-                          └───────────────────────┘
+                         ┌────────────────────────────┐
+                         │      User Interface        │
+                         │ (PyQt6 GUI / CLI / Tests)  │
+                         └─────────────┬──────────────┘
+                                       │
+                                       ▼
+                         ┌────────────────────────────┐
+                         │    Query Processor         │
+                         │  (Tokenize / Embed)        │
+                         └─────┬───────────┬──────────┘
+                               │           │
+           ┌───────────────────┘           └───────────────────┐
+           ▼                                                   ▼
+┌───────────────────────────┐                 ┌───────────────────────────┐
+│      Lexical Retrieval    │                 │      Semantic Retrieval   │
+│    (BM25: title/artist)   │                 │    (Dense: medium/desc)  │
+└────────────┬──────────────┘                 └────────────┬──────────────┘
+             │                                              │
+             └───────────────────┬──────────────────────────┘
+                                 ▼
+                   ┌────────────────────────────┐
+                   │   Fusion (RRF, k=60)       │
+                   └───────┬────────────┬───────┘
+                           ▼            ▼
+                   Presentation Layer  (Formatted Top-K)
 ```
+
+---
 
 ## Setup and Execution Instructions
 
-**1. Install Dependencies**  
-Ensure Python 3.9+ is installed, then run:
+### 1. Install Dependencies
+
+You need **Python 3.9+**.  
+This project runs out-of-the-box on CPU or CUDA GPU.
+
+**Standard install:**
 
 ```bash
 pip install -r requirements.txt
 ```
 
-**2. Launch the Search Engine**  
-This command initializes the in-memory indexes and starts the interactive CLI. The system will automatically download the dataset if it is not found locally.
+- The correct PyTorch build (CPU or CUDA) will be installed automatically for your machine.
+- [SentenceTransformers](https://www.sbert.net/) will auto-select your device.
+
+### Advanced: Forcing a specific PyTorch/CUDA version
+
+To force a specific CUDA build (e.g., CUDA 12.1), use:
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+(Then, install other packages.) For most users, **this is not necessary**.
+
+---
+
+### 2. Launch the Search Engine
+
+This command initializes indexes and starts the interactive PyQt6 GUI.  
+**The engine will automatically download and process the dataset if not found locally.**
 
 ```bash
 python main.py
 ```
 
+- **CLI mode**: `python main.py --cli`
+- **Run tests**: `python main.py --test`
+- **Run system evaluation**: `python main.py --evaluate`
+
 ---
 
-### Optional Manual Setup
+### 3. Manual Data ETL (Optional)
 
-**Ingest and Prepare Data**  
-If you wish to refresh or modify the document store independently of the main engine:
+To refresh or clean the document store:
 
 ```bash
 python ingest_data.py
@@ -117,31 +138,48 @@ python ingest_data.py
 
 ---
 
-**3. Execute Unit Tests**  
-Verify the functional integrity and latency constraints of the core engine components:
+### 4. Unit Tests
+
+To validate core search/latency:
 
 ```bash
 python test_engine.py
 ```
 
-### Tests include
+---
 
-- Sparse BM25 retrieval
-- Dense semantic retrieval
-- Hybrid RRF fusion
-- Query latency checks  
+### 5. System Evaluation
 
-**4. Run System Evaluation**  
-Compute Mean Reciprocal Rank (MRR) and NDCG@10 against the predefined QRELS dataset:
+Run all IR metrics on the current index:
 
 ```bash
 python evaluate_engine.py
 ```
 
+---
+
 ## Evaluation Metrics
 
-The system is evaluated using standard Information Retrieval metrics:
+- **MRR (Mean Reciprocal Rank)**: Known-item/exact search effectiveness.
+- **NDCG@10 (Normalized Discounted Cumulative Gain):** Semantic ranking quality of top 10.
 
-- **MRR (Mean Reciprocal Rank)**: Measures known-item retrieval effectiveness.
+---
 
-- **NDCG@10 (Normalized Discounted Cumulative Gain)**: Measures ranking quality for the top 10 results.
+## Hardware Notes
+
+- **Runs on both CPU and GPU** out of the box.
+- No CUDA/PyTorch config is required for most users.
+- If you have a GPU and CUDA drivers, the engine will use it automatically for dense retrieval.
+
+---
+
+## More
+
+- [Sentence Transformers Documentation](https://www.sbert.net/)
+- [PyQt6 Documentation](https://doc.qt.io/qtforpython-6/)
+- [Rank-BM25 Project](https://github.com/dorianbrown/rank_bm25)
+- [RRF Paper](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)
+
+---
+
+(c) 2026. ECS736P/U, Queen Mary University of London

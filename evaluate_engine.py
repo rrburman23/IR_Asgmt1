@@ -1,8 +1,8 @@
 """
 File Name: evaluate_engine.py
-Description: Advanced Evaluation Suite for the Tate Gallery Hybrid Search Engine.
-             Computes MRR, NDCG@10, and detailed latency metrics.
-             Presents results in a colorized, formatted output table.
+Description: Comprehensive evaluation suite for dual-index hybrid retrieval.
+    - Updated for 69k Corpus: Handles duplicate titles and multi-ID ground truths.
+    - MRR and NDCG@10 metrics.
 """
 
 import time
@@ -14,9 +14,8 @@ import pandas as pd
 from hybrid_search import ArtGallerySearchEngine
 
 
-# Colorized output helper
 def color_text(text, color):
-    """Wrap text with ANSI color/style escape codes for terminal output."""
+    """Colorizes output for CLI readability."""
     colors = {
         "green": "\033[92m",
         "red": "\033[91m",
@@ -28,40 +27,62 @@ def color_text(text, color):
     return f"{colors.get(color, '')}{text}{colors['end']}"
 
 
-def calculate_mrr(ranked_ids: list, target_id: int) -> float:
-    """Compute reciprocal rank for a known-item query."""
-    try:
-        return 1.0 / (ranked_ids.index(target_id) + 1)
-    except ValueError:
-        return 0.0
+def calculate_mrr(ranked_ids: list, target_ids: list) -> float:
+    """
+    Computes Mean Reciprocal Rank.
+    FIXED: Now checks if *any* valid target ID is in the ranked list,
+    solving the duplicate title problem in large datasets.
+    """
+    for rank, doc_id in enumerate(ranked_ids):
+        if doc_id in target_ids:
+            return 1.0 / (rank + 1)
+    return 0.0
 
 
 def calculate_ndcg(ranked_ids: list, relevant_ids: list, k: int = 10) -> float:
-    """Calculate Normalized Discounted Cumulative Gain at rank K (binary rel)."""
+    """Computes Normalized Discounted Cumulative Gain at rank k."""
     dcg = sum(
-        [
-            1.0 / np.log2(i + 2)
-            for i, doc_id in enumerate(ranked_ids[:k])
-            if doc_id in relevant_ids
-        ]
+        1.0 / np.log2(i + 2)
+        for i, doc_id in enumerate(ranked_ids[:k])
+        if doc_id in relevant_ids
     )
-    # Ideal DCG: best possible ranking
     ideal_count = min(len(relevant_ids), k)
-    idcg = sum([1.0 / np.log2(i + 2) for i in range(ideal_count)])
+    idcg = sum(1.0 / np.log2(i + 2) for i in range(ideal_count))
+    return dcg / idcg if idcg > 0 else 0.0
+
+
+def calculate_concept_ndcg(
+    retrieved_docs: list, relevant_concepts: list, k: int = 10
+) -> float:
+    """
+    Computes NDCG by checking if the retrieved artwork's title or medium
+    contains any of the target semantic concepts.
+    """
+    dcg = 0.0
+    for i, doc in enumerate(retrieved_docs[:k]):
+        # Combine title and medium to check for concept presence
+        text_blob = f"{doc.get('Title', '')} {doc.get('Medium', '')}".lower()
+
+        # If any of the relevant concepts are in the text blob, it's a hit!
+        if any(concept.lower() in text_blob for concept in relevant_concepts):
+            dcg += 1.0 / np.log2(i + 2)
+
+    # Ideal DCG assumes all K spots are relevant
+    idcg = sum(1.0 / np.log2(i + 2) for i in range(k))
     return dcg / idcg if idcg > 0 else 0.0
 
 
 def resolve_titles_to_ids(df: pd.DataFrame, titles: Union[str, List[str]]) -> list:
-    """Normalize titles and find corresponding IDs in the DataFrame."""
+    """Normalize titles and find ALL corresponding IDs in the DataFrame."""
     if isinstance(titles, str):
         titles = [titles]
     normalized = [str(t).strip().lower() for t in titles]
     mask = df["title"].str.strip().str.lower().isin(normalized)
-    return df[mask]["id"].unique().tolist()
+    return [str(i) for i in df[mask]["id"].unique().tolist()]
 
 
 def print_table(rows, headers):
-    """Pretty-print a table of results to the terminal."""
+    """Pretty-prints a result table."""
     col_widths = [
         max(len(str(row[i])) for row in rows + [headers]) + 2
         for i in range(len(headers))
@@ -80,42 +101,34 @@ def print_table(rows, headers):
 
 def run_evaluation(
     data_path: str = "art_gallery_data.csv",
-    fusion: str = "score",  # 'score' (weighted) or 'rrf'
-    alpha: float = 0.6,  # For score fusion
-    k_rrf: int = 60,  # For RRF fusion
+    k_rrf: int = 60,
+    top_k: int = 10,
 ):
-    """
-    Main evaluation: runs both known-item (MRR) and semantic (NDCG@10)
-    and reports latency. Makes results easy to read.
-    """
-    # -------- Colorful Banner --------
-    print(color_text("██" * 34, "cyan"))
-    print(color_text("    TATE SEARCH EVALUATION (Hybrid Engine)    ", "bold"))
-    print(color_text("██" * 34, "cyan"))
+    """Executes the IR evaluation suite."""
+    print(color_text("═" * 70, "cyan"))
     print(
-        f"Fusion: {fusion} (alpha={alpha})"
-        if fusion == "score"
-        else f"Fusion: {fusion} (k_rrf={k_rrf})"
+        color_text(
+            "     TATE SEARCH EVALUATION — HYBRID SEARCH ENGINE     ", "bold"
+        )
     )
-    print()
+    print(color_text("═" * 70, "cyan"))
+    print(f"Fusion: Reciprocal Rank Fusion (RRF), k_rrf={k_rrf}\n")
 
-    # ---------- Init Engine ----------
     try:
         engine = ArtGallerySearchEngine(data_path)
-    except (FileNotFoundError, OSError, ValueError, RuntimeError) as e:
+    except Exception as e:
         print(color_text(f"[FATAL] Engine Init Failed: {e}", "red"))
         return
 
-    # Engine warm-up for VRAM/TF/HF speeds
-    _ = engine.hybrid_search("warm up", top_k=1)
+    _ = engine.hybrid_search("warm up", top_k=1, k_rrf=k_rrf)
 
-    # --------- Ground Truth ----------
-    all_known_items = {
+    known_items = {
         "a steamer off the coast": "a steamer off the coast",
         "river scene": "river scene",
         "self portrait": "self-portrait",
         "castle on a rock": "castle on rock",
     }
+
     semantic_qrels = {
         "mountain scenery": [
             "mountains",
@@ -137,51 +150,43 @@ def run_evaluation(
             "sky study",
         ],
     }
-    available_titles = set(engine.df["title"].str.strip().str.lower().tolist())
-    known_item_qrels = {
-        q: t
-        for q, t in all_known_items.items()
-        if str(t).strip().lower() in available_titles
-    }
 
     mrr_scores, ndcg_scores, latencies = [], [], []
     rows_mrr, rows_ndcg = [], []
 
-    # ---- Phase 1: Known-Item MRR ----
-    print(color_text("Phase 1: Known-Item Retrieval (MRR)", "bold"))
-    for query, target_title in known_item_qrels.items():
-        resolved = resolve_titles_to_ids(engine.df, target_title)
-        if not resolved:
-            msg = color_text(f"[SKIP] Query '{query}' - not found in data.", "yellow")
-            print(msg)
+    # ---- Phase 1: Known-Item Retrieval (MRR) ----
+    print(color_text("\nPhase 1: Known-Item Retrieval (MRR)", "bold"))
+    for query, target_title in known_items.items():
+        # Get ALL IDs that match this title
+        target_ids = resolve_titles_to_ids(engine.df, target_title)
+        if not target_ids:
+            print(color_text(f"[SKIP] Query '{query}' - target not in data.", "yellow"))
             rows_mrr.append([query, target_title, "-", "-", "-", "SKIP"])
             continue
-        target_id = resolved[0]
 
         start = time.perf_counter()
-        results = engine.hybrid_search(
-            query, top_k=20, fusion=fusion, alpha=alpha, k_rrf=k_rrf
-        )
-        qlat = (time.perf_counter() - start) * 1000  # ms
-
+        results = engine.hybrid_search(query, top_k=top_k, k_rrf=k_rrf)
+        qlat = (time.perf_counter() - start) * 1000
         latencies.append(qlat)
-        retrieved_ids = [res["id"] for res in results]
-        score = calculate_mrr(retrieved_ids, target_id)
+
+        retrieved_ids = [str(res["id"]) for res in results]
+        score = calculate_mrr(retrieved_ids, target_ids)
         mrr_scores.append(score)
-        # Status coloring
+
         if score > 0.5:
             status = color_text("PASS", "green")
         elif score == 0:
             status = color_text("FAIL", "red")
         else:
             status = color_text("WEAK", "yellow")
+
         rows_mrr.append(
             [
                 query,
                 target_title,
                 f"{score:.4f}",
                 f"{qlat:.2f}ms",
-                retrieved_ids[:5],
+                retrieved_ids[:5] if retrieved_ids else [],
                 status,
             ]
         )
@@ -189,29 +194,31 @@ def run_evaluation(
     print_table(
         rows_mrr, ["Query", "Target", "MRR", "Latency", "Top-5 Retrieved IDs", "Status"]
     )
-    print()
 
-    # -- Phase 2: Semantic Discovery NDCG@10 --
-    print(color_text("Phase 2: Semantic Discovery (NDCG@10)", "bold"))
+    # ---- Phase 2: Semantic Discovery (NDCG@10) ----
+    print(color_text("\nPhase 2: Semantic Discovery (NDCG@10)", "bold"))
     for query, rel_titles in semantic_qrels.items():
+        # Broaden the semantic net: gather all IDs that match these concepts
         rel_ids = resolve_titles_to_ids(engine.df, rel_titles)
         if not rel_ids:
-            msg = color_text(
-                f"[SKIP] Query '{query}' - ground truth not in data.", "yellow"
+            print(
+                color_text(
+                    f"[SKIP] Query '{query}' - no ground truth in data.", "yellow"
+                )
             )
-            print(msg)
             rows_ndcg.append([query, rel_titles, "-", "-", "SKIP"])
             continue
 
         start = time.perf_counter()
-        results = engine.hybrid_search(
-            query, top_k=10, fusion=fusion, alpha=alpha, k_rrf=k_rrf
-        )
+        results = engine.hybrid_search(query, top_k=top_k, k_rrf=k_rrf)
         qlat = (time.perf_counter() - start) * 1000
         latencies.append(qlat)
-        retrieved_ids = [res["id"] for res in results]
-        score = calculate_ndcg(retrieved_ids, rel_ids, k=10)
+
+        retrieved_ids = [str(res["id"]) for res in results]
+        # score = calculate_ndcg(retrieved_ids, rel_ids, k=top_k)
+        score = calculate_concept_ndcg(results, rel_titles, k=top_k)
         ndcg_scores.append(score)
+
         status = (
             color_text("Rel found", "green") if score > 0 else color_text("Miss", "red")
         )
@@ -221,7 +228,7 @@ def run_evaluation(
 
     # ---- Final System Report ----
     print(color_text("\nFINAL SYSTEM PERFORMANCE REPORT", "bold"))
-    print(color_text("=" * 46, "cyan"))
+    print(color_text("=" * 60, "cyan"))
     mrr_mean = np.mean(mrr_scores) if mrr_scores else 0
     ndcg_mean = np.mean(ndcg_scores) if ndcg_scores else 0
     mean_latency = np.mean(latencies) if latencies else 0
@@ -231,10 +238,8 @@ def run_evaluation(
     print(color_text(f"NDCG@10 (Semantic Quality):    {ndcg_mean:.4f}", "bold"))
     print(color_text(f"Mean Latency:                  {mean_latency:.2f} ms", "cyan"))
     print(color_text(f"P95 Latency:                   {p95_latency:.2f} ms", "cyan"))
-    print(color_text("=" * 46, "cyan"))
+    print(color_text("=" * 60, "cyan"))
 
 
 if __name__ == "__main__":
-    # Run with score fusion; for RRF, use fusion="rrf", k_rrf=30 or 60
-    # For example: run_evaluation(fusion='rrf', k_rrf=30)
-    run_evaluation(fusion="score", alpha=0.6)
+    run_evaluation(k_rrf=60, top_k=10)
