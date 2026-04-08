@@ -1,8 +1,7 @@
 """
 File Name: gui.py
-Description: PyQt6 GUI for the Tate Gallery Search Engine.
-- Hierarchy: Name -> Artist -> Medium -> Description.
-- Features: Clear History, Slash Commands, Image Placeholders.
+Description: PyQt6 GUI for Art Search.
+- Layout: Clean Div-based Hierarchy (Name -> Artist -> Medium -> Description).
 """
 
 import sys
@@ -25,11 +24,10 @@ from PyQt6.QtWidgets import (
     QListWidget,
 )
 from PyQt6.QtCore import QThread, pyqtSignal, QUrl
+from PyQt6.QtGui import QDesktopServices, QIcon
 
 
 class EngineLoadThread(QThread):
-    """Backgrounds the engine initialization."""
-
     engine_ready = pyqtSignal(object)
     error_occurred = pyqtSignal(str)
 
@@ -45,15 +43,17 @@ class EngineLoadThread(QThread):
 
 
 class ArtSearchGUI(QMainWindow):
-    """Main window with Art Name -> Artist -> Medium -> Description hierarchy."""
-
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Tate Gallery | Semantic Search")
+        self.setWindowIcon(QIcon("icon.png"))
+        self.setStyleSheet("background-color: #0f0f0f; color: #ccc;")
+        self.setMinimumSize(900, 600)
         self.resize(1150, 800)
         self.engine = None
         self.image_cache: dict[str, str] = {}
         self.apply_styling()
+        self.setWindowIcon(QIcon("icon.png"))
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -77,19 +77,17 @@ class ArtSearchGUI(QMainWindow):
             QLineEdit { 
                 padding: 12px; border-radius: 8px; 
                 background: #1a1a1a; color: white; border: 1px solid #333; 
+                font-size: 14px;
             }
             QPushButton { 
                 padding: 12px; border-radius: 8px; 
                 background: #2980b9; color: white; font-weight: bold; 
             }
             QPushButton:hover { background: #3498db; }
-            
-            /* Clear History Button Styling */
             QPushButton#clearBtn { 
                 background: #222; color: #888; font-size: 11px; margin-top: 5px;
             }
             QPushButton#clearBtn:hover { background: #e74c3c; color: white; }
-
             QTextBrowser { background: #141414; border: 1px solid #222; border-radius: 8px; }
             QListWidget { background: #1a1a1a; border: none; border-radius: 8px; }
             QListWidget::item { padding: 10px; border-bottom: 1px solid #222; }
@@ -99,7 +97,6 @@ class ArtSearchGUI(QMainWindow):
     def _setup_sidebar(self):
         sidebar = QVBoxLayout()
         sidebar.setContentsMargins(0, 0, 10, 0)
-
         lbl = QLabel("SEARCH HISTORY")
         lbl.setStyleSheet(
             "font-weight: bold; color: #555; font-size: 11px; margin-bottom: 5px;"
@@ -109,7 +106,6 @@ class ArtSearchGUI(QMainWindow):
         self.history_list.itemClicked.connect(self._on_history_clicked)
         self.history_list.setFixedWidth(220)
 
-        # RESTORED: Clear History Button
         self.btn_clear = QPushButton("Clear History")
         self.btn_clear.setObjectName("clearBtn")
         self.btn_clear.clicked.connect(self.clear_history)
@@ -123,7 +119,7 @@ class ArtSearchGUI(QMainWindow):
         content = QVBoxLayout()
         nav = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search collection or type /help...")
+        self.search_input.setPlaceholderText("Search the archives or type /help...")
         self.search_input.returnPressed.connect(self.perform_search)
         self.btn_search = QPushButton("Search")
         self.btn_search.clicked.connect(self.perform_search)
@@ -158,15 +154,21 @@ class ArtSearchGUI(QMainWindow):
             self.perform_search()
 
     def _on_suggestion_clicked(self, qurl: QUrl):
-        self.search_input.setText(qurl.toString())
-        self.perform_search()
+        url_str = qurl.toString()
+        if url_str.startswith("img::"):
+            # Open thumbnail in browser
+            image_url = url_str[5:]  # strip the "img::" prefix
+            QDesktopServices.openUrl(QUrl(image_url))
+        else:
+            # Spelling suggestion — re-run search
+            self.search_input.setText(url_str)
+            self.perform_search()
 
     def clear_history(self):
-        """Wipes the history list widget."""
         self.history_list.clear()
 
     def _get_img_b64(self, url: str) -> str | None:
-        if not url or url == "nan" or len(url) < 10:
+        if not url or len(url) < 10:
             return None
         if url in self.image_cache:
             return self.image_cache[url]
@@ -223,8 +225,9 @@ class ArtSearchGUI(QMainWindow):
                 self.status.setStyleSheet("color: #2ecc71;")
                 self.search_input.clear()
                 return
+
             self.results_area.setHtml(
-                f"<div style='color:red;'>Unknown command: {query}</div>"
+                f"<div style='color:#e74c3c;'>[ERROR] Unknown command: {query}. Valid commands are /help, /exit, /test, /evaluate.</div>"
             )
             return
 
@@ -248,28 +251,53 @@ class ArtSearchGUI(QMainWindow):
             sug = results[0]["Suggestion"]
             suggestion_html = (
                 f"<div style='color:#f39c12; margin-bottom:10px;'>"
-                f"Did you mean: <a href='{sug}' style='color:#3498db; "
-                f"text-decoration:none;'><b>{sug}</b></a>?</div>"
+                f"Did you mean: <a href='{sug}' style='color:#3498db; text-decoration:none;'><b>{sug}</b></a>?</div>"
             )
 
         html = f"{suggestion_html}<h2 style='color:white;'>Results: '{query}' ({duration:.3f}s)</h2><hr>"
 
         for res in results:
-            b64 = self._get_img_b64(res["Thumbnail"])
+            thumb_url = res["Thumbnail"]
+            b64 = self._get_img_b64(thumb_url)
             if b64:
-                img_html = f"<img src='data:image/jpeg;base64,{b64}' width='140' style='border-radius:4px;'/>"
+                img_html = f"<a href='img::{thumb_url}'><img src='data:image/jpeg;base64,{b64}' width='140' style='border-radius:4px; cursor:pointer;'/></a>"
             else:
                 img_html = "<div style='width:140px; height:100px; background:#222; border-radius:4px; text-align:center; padding-top:40px; color:#555;'>No Image</div>"
 
-            # STRICT HIERARCHY: Name -> Artist -> Medium -> Description
+            # DIV-BASED HIERARCHY (Clean Spacing)
             row = "<table width='100%' style='margin-bottom:20px;'><tr>"
             row += f"<td width='160' valign='top'>{img_html}</td>"
             row += "<td valign='top'>"
-            row += f"<b style='color:#3498db; font-size:20px;'>{res['Title']}</b><br>"
-            row += f"<b style='color:#ecf0f1; font-size:16px;'>{res['Artist']}</b><br>"
-            row += f"<i style='color:#f1c40f; font-size:14px;'>{res['Medium']}</i><br>"
-            row += f"<p style='color:#aaa; font-size:13px;'>{res['Description']}</p>"
-            row += f"<div style='color:#2ecc71; font-size:11px; margin-top:5px;'><b>Match:</b> {res['Reasons']} | <b>RRF:</b> {res['Score']}</div>"
+
+            # Title & Year
+            year_str = (
+                f" ({res['Year']})"
+                if res["Year"] and res["Year"] != "Unknown Date"
+                else ""
+            )
+
+            row += f"<div style='font-size:18px; font-weight:bold; margin-bottom:2px;'><a href='img::{thumb_url}' style='color:#3498db; text-decoration:none;'>{res['Title']}</a><span style='color:#7f8c8d; font-size:14px; font-weight:normal;'>{year_str}</span></div>"
+
+            # Artist
+            row += f"<div style='color:#ecf0f1; font-size:15px; font-weight:bold; margin-bottom:4px;'>{res['Artist']}</div>"
+
+            # Medium
+            row += f"<div style='color:#f1c40f; font-size:13px; font-style:italic; margin-bottom:6px;'>{res['Medium']}</div>"
+
+            # Description
+            row += f"<div style='color:#cccccc; font-size:13px; margin-bottom:6px;'>{res['Description']}</div>"
+
+            # Dimensions & Credit
+            meta = []
+            if res.get("Dimensions") and "Unavailable" not in res["Dimensions"]:
+                meta.append(res["Dimensions"])
+            if res.get("CreditLine"):
+                meta.append(f"Credit: {res['CreditLine']}")
+            if meta:
+                row += f"<div style='color:#7f8c8d; font-size:11px; margin-bottom:8px;'>{' | '.join(meta)}</div>"
+
+            # Match Logic
+            row += f"<div style='color:#2ecc71; font-size:11px;'><b>Match:</b> {res['Reasons']} &nbsp;|&nbsp; <b>RRF Score:</b> {res['Score']}</div>"
             row += (
                 "</td></tr></table><hr style='border:none; border-top:1px solid #222;'>"
             )
