@@ -1,6 +1,6 @@
 """
 File Name: test_engine.py
-Description: Automated unit tests for the Tate Search Engine v3.2.
+Description: Automated unit tests for the Tate Search Engine
 - Updated to resolve Pylance type-safety and attribute access warnings.
 - Verifies fielded indexing and RRF fusion schema.
 """
@@ -63,9 +63,18 @@ class TestArtGallerySearchEngine(unittest.TestCase):
         self.assertEqual(len(results), 5)
 
         # Verify Name -> Artist -> Medium -> Desc hierarchy keys exist
-        required = ["Title", "Artist", "Medium", "Description", "Reasons"]
+        required = [
+            "Title",
+            "Artist",
+            "Medium",
+            "Year",
+            "Dimensions",
+            "CreditLine",
+            "Description",
+            "Reasons",
+        ]
         for k in required:
-            self.assertIn(k, results[0])
+            self.assertIn(k, results[0], f"Key {k} missing from results.")
 
     def test_latency_constraint(self):
         """Ensures search latency is under 200ms for typical queries."""
@@ -75,6 +84,48 @@ class TestArtGallerySearchEngine(unittest.TestCase):
         self.assertLess(
             latency, 0.200, f"Latency {latency:.4f}s exceeded 200ms threshold."
         )
+
+    def test_artist_priority(self):
+        """Searches for an artist should prioritize their works over others."""
+        """Top results for 'turner' should be by Turner."""
+        results = self.engine.hybrid_search("turner", top_k=5)
+        artists = [r["Artist"].lower() for r in results]
+        # At least the first three should be J.M.W. Turner
+        self.assertTrue(
+            all("turner" in artist for artist in artists[:3]),
+            "Artist priority: First results should be by the searched artist."
+        )
+    
+
+    def test_depiction_penalty(self):
+        """Depictions (statues/portraits) shouldn't top normal artist queries but should if asked."""
+        # 'turner' should not return 'statue' or 'portrait' first
+        normal_query = self.engine.hybrid_search("turner", top_k=5)
+        self.assertFalse(
+            "portrait" in normal_query[0]["Title"].lower() or "statue" in normal_query[0]["Title"].lower(),
+            "Depiction should not be first for generic artist queries."
+        )
+        # But 'portrait of turner' should float such results up
+        user_query = self.engine.hybrid_search("portrait of turner", top_k=5)
+        self.assertTrue(
+            any("portrait" in r["Title"].lower() or "statue" in r["Title"].lower() for r in user_query[:3]),
+            "Depiction should bubble up if user requests it."
+        )
+
+    def test_subject_only_penalty(self):
+        """Works 'about' an artist (not by them) are downranked."""
+        results = self.engine.hybrid_search("turner", top_k=10)
+        for idx, r in enumerate(results):
+            is_subject_only = (
+                "turner" in r["Title"].lower()
+                and "turner" not in r["Artist"].lower()
+            )
+            if is_subject_only:
+                # Shouldn't be in the top 3 results
+                self.assertTrue(
+                    idx > 3,
+                    "Subject-only (not by) artist matches should be ranked below true artist works."
+                )
 
 
 if __name__ == "__main__":
