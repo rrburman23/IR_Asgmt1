@@ -27,12 +27,17 @@ def setup_nltk():
     """Downloads necessary NLTK data models if not already present."""
     try:
         nltk.data.find("tokenizers/punkt")
-    except nltk.downloader.DownloadError:
+    except LookupError:
         print("[INFO] NLTK 'punkt' tokenizer not found. Downloading...")
         nltk.download("punkt")
     try:
+        nltk.data.find("tokenizers/punkt_tab")
+    except LookupError:
+        print("[INFO] NLTK 'punkt_tab' not found. Downloading...")
+        nltk.download("punkt_tab")
+    try:
         nltk.data.find("corpora/stopwords")
-    except nltk.downloader.DownloadError:
+    except LookupError:
         print("[INFO] NLTK 'stopwords' not found. Downloading...")
         nltk.download("stopwords")
     print("[INFO] NLTK resources are ready.")
@@ -175,6 +180,17 @@ def process_and_filter(input_file, output_file, sample_size=2000):
     # --------------------------------------------------
     for col in ["artist", "title", "medium"]:
         df[col] = df[col].astype(str).apply(normalize_text_for_display)
+
+    print("[INFO] Engineering features for sparse and dense retrieval...")
+    # 1. Create and process a combined field for the sparse index
+    df["sparse_content"] = df["title"] + " " + " " + df["artist"] + " " + df["medium"]
+    df["processed_sparse_text"] = df["sparse_content"].apply(process_text_for_sparse)
+
+    # 2. Create and serialize chunks from the description for the dense index
+    df["description_chunks"] = df["medium"].apply(
+        lambda x: create_text_chunks(x, chunk_size=100, overlap=20)
+    )
+    df["description_chunks"] = df["description_chunks"].apply(json.dumps)
 
     # --------------------------------------------------
     # Robust sampling
