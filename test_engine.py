@@ -27,23 +27,43 @@ class TestArtGallerySearchEngine(unittest.TestCase):
         )
 
     def test_indexes_built(self):
-        embeddings = self.engine.document_embeddings
-
+        # Sparse index
         self.assertIsNotNone(
             self.engine.bm25, "BM25 sparse index instantiation failed."
         )
+
+        # Dense index: support both old and new attribute names
+        embeddings = getattr(self.engine, "chunk_embeddings", None)
+        if embeddings is None:
+            embeddings = getattr(self.engine, "document_embeddings", None)
+
         self.assertIsNotNone(
             embeddings,
-            "Dense document embedding generation failed.",
+            "Dense embedding index not built (chunk_embeddings/document_embeddings missing).",
         )
         if embeddings is None:
-            self.fail("Dense document embedding generation failed.")
+            self.fail(
+                "Dense embedding index not built (chunk_embeddings/document_embeddings missing)."
+            )
 
+        # If chunking is enabled, embedding count should be >= doc count
         self.assertGreaterEqual(
             len(embeddings),
             len(self.engine.df),
-            "Embedding count should be >= document count due to chunking.",
+            "Embedding count should be >= document count due to chunking (or 1:1 fallback).",
         )
+
+        # Mapping array should exist when using chunk embeddings
+        chunk_map = getattr(self.engine, "chunk_to_doc_idx", None)
+        self.assertIsNotNone(
+            chunk_map, "chunk_to_doc_idx must exist for chunked dense retrieval."
+        )
+        if chunk_map is not None:
+            self.assertEqual(
+                len(chunk_map),
+                len(embeddings),
+                "chunk_to_doc_idx length must match chunk_embeddings length.",
+            )
 
     def test_sparse_retrieval(self):
         query = "oil painting"
@@ -65,7 +85,7 @@ class TestArtGallerySearchEngine(unittest.TestCase):
         query = "portrait of a woman"
         top_k = 5
         results = self.engine.hybrid_search(query, top_k=top_k, per_page=top_k)
-        # MODIFIED: Now check the returned dict!
+
         self.assertIsInstance(
             results, dict, "Hybrid search output must be a dictionary."
         )
@@ -75,6 +95,7 @@ class TestArtGallerySearchEngine(unittest.TestCase):
             top_k,
             f"Hybrid search result length must equal {top_k}.",
         )
+
         first_result = results["results"][0]
         expected_keys = [
             "Rank",
@@ -94,9 +115,7 @@ class TestArtGallerySearchEngine(unittest.TestCase):
         _ = self.engine.hybrid_search(query, top_k=10)
         latency = time.perf_counter() - start_time
         self.assertLess(
-            latency,
-            1.0,
-            f"Query latency ({latency:.4f}s) exceeded 1s threshold.",
+            latency, 1.0, f"Query latency ({latency:.4f}s) exceeded 1s threshold."
         )
 
 

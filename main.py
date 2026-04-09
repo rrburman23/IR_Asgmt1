@@ -15,6 +15,7 @@ import unittest
 # pylint: disable=no-name-in-module
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer
+from PyQt6.QtGui import QIcon
 
 # Local project imports
 from ingest_data import ensure_data_exists, OUTPUT_FILE
@@ -23,6 +24,8 @@ from gui import ArtSearchGUI
 
 # Suppress TensorFlow/transformer logging before model load
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+ICON_PATH = os.path.join(os.path.dirname(__file__), "icon.ico")
 
 
 def launch_tests():
@@ -40,9 +43,9 @@ def launch_tests():
 def launch_evaluation():
     """Runs strict IR evaluation on MRR and NDCG@10 metrics."""
     # pylint: disable=import-outside-toplevel
-    from evaluate_engine import run_evaluation
+    from evaluate_engine import EvalConfig, run_evaluation
 
-    run_evaluation(OUTPUT_FILE)
+    run_evaluation(config=EvalConfig(data_path=OUTPUT_FILE))
 
 
 def launch_cli():
@@ -108,6 +111,7 @@ def launch_gui():
     """Launches the PyQt GUI with robust signal handling."""
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(ICON_PATH))
 
     timer = QTimer()
     timer.start(500)
