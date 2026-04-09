@@ -46,7 +46,7 @@ class ArtSearchGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Tate Gallery | Semantic Search")
-        self.setWindowIcon(QIcon("icon.png"))
+        self.setWindowIcon(QIcon("icon.ico"))
         self.setStyleSheet("background-color: #0f0f0f; color: #ccc;")
         self.setMinimumSize(900, 600)
         self.resize(1150, 800)
@@ -60,8 +60,7 @@ class ArtSearchGUI(QMainWindow):
         self.total_pages = 1
 
         self.apply_styling()
-        self.setWindowIcon(QIcon("icon.png"))
-
+        
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.main_layout = QHBoxLayout(self.central_widget)
