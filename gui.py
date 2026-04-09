@@ -313,19 +313,64 @@ class ArtSearchGUI(QMainWindow):
         if not query or not self.engine:
             return
 
-        # System commands: /help, /exit
+        # --- UPDATED COMMAND HANDLING FOR EXE STABILITY ---
         if query.startswith("/"):
             cmd = query.lower()
             if cmd == "/exit":
                 QApplication.quit()
                 return
+
             if cmd == "/help":
                 html = (
-                    "<h2 style='color:white;'>System Guide</h2><hr><ul>"
+                    "<h2 style='color:white;'>System Guide</h2><hr>"
+                    "<p>Internal commands for the standalone executable:</p>"
+                    "<ul>"
+                    "<li><b>/test</b> - Run system integrity benchmarks.</li>"
+                    "<li><b>/evaluate</b> - Run MRR and NDCG discovery metrics.</li>"
                     "<li><b>/help</b> - Show this manual.</li>"
                     "<li><b>/exit</b> - Quit the application.</li></ul>"
                 )
                 self.results_area.setHtml(html)
+                self.search_input.clear()
+                return
+
+            if cmd in ["/test", "/evaluate", "/eval"]:
+                self.results_area.setHtml(
+                    "<h2 style='color:#f39c12;'>Running System Suite...</h2><p>Please wait, calculating metrics...</p>"
+                )
+                QApplication.processEvents()  # Keeps GUI from freezing while running
+
+                import io
+                from contextlib import redirect_stdout
+                import re
+
+                f = io.StringIO()
+
+                try:
+                    with redirect_stdout(f):
+                        if cmd == "/test":
+                            from main import launch_tests
+
+                            launch_tests()
+                        else:
+                            from main import launch_evaluation
+
+                            launch_evaluation()
+                    # Remove ANSI color codes for clarity
+                    output = f.getvalue()
+                    clean_output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+                    # Render in clear, large, monospaced text
+                    html_output = (
+                        "<h2 style='color:#2ecc71;'>Suite Complete</h2><hr>"
+                        "<pre style='font-family:Consolas,Monaco,monospace; font-size:1.5em; color:#ccc; white-space:pre-wrap; background:#232323; padding:20px; border-radius:8px;'>"
+                        f"{clean_output}</pre>"
+                    )
+                    self.results_area.setHtml(html_output)
+                except Exception as e:
+                    self.results_area.setHtml(
+                        f"<h2 style='color:#e74c3c;'>Suite Failed</h2><p>{str(e)}</p>"
+                    )
+
                 self.search_input.clear()
                 return
 
