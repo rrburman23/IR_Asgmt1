@@ -1,6 +1,6 @@
 # Art Gallery Hybrid Search Engine
 
-This repository contains the codebase for Assignment 1 (Information Retrieval ECS736P/U). It implements a dual-pipeline search engine for a curated corpus of Tate Gallery artwork, following a practical IR architecture with sparse retrieval, dense retrieval, and intent-based re-ranking.
+This repository contains the codebase for Assignment 2 (Information Retrieval ECS736P/U). It implements a dual-pipeline search engine for a curated corpus of Tate Gallery artwork, following a practical IR architecture with sparse retrieval, dense retrieval, and intent-based re-ranking.
 
 ## Project Structure
 
@@ -160,9 +160,9 @@ A compiled, portable version of the application is hosted under the **Releases**
 
 ### Running the Executable
 
-1. Download the zipped release folder.
-2. Ensure `art_gallery_data.csv` and `embeddings.npy` are located in the root directory of the extracted folder.
-3. Launch `Tate Gallery Search Engine.exe`.
+1. Download and extract the `Tate_Search_v1.0.0.zip` from the Releases section.
+2. Launch `Tate Gallery Search Engine.exe`.
+3. **Note:** The pre-computed semantic index (`embeddings.npy`) is included in the package. The application will load this into memory immediately, providing sub-100ms hybrid search results on launch.
 
 ## Hardware Performance
 
