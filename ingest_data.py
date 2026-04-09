@@ -11,6 +11,7 @@ Description: Download, clean, and preprocess the Tate Gallery dataset.
 import os
 import re
 import json
+import unicodedata
 import pandas as pd
 import requests
 
@@ -48,9 +49,9 @@ def download_dataset(url, filename, timeout=30):
 
 
 def normalize_text(text):
-    """Aggressive normalization exclusively for hidden search fields."""
     if not isinstance(text, str):
         return ""
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     text = text.lower().replace("-", " ")
     text = re.sub(r"[^\w\s]", "", text)
     return re.sub(r"\s+", " ", text).strip()
