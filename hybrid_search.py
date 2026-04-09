@@ -4,7 +4,7 @@ File Name: hybrid_search.py
 Description:
 Core Hybrid Search Engine for the Tate dataset.
 - Fielded BM25 with surname strong weighting.
-- Dense retrieval via SentenceTransformers.
+- Dense retrieval via SentenceTransformers (chunked dense with max pooling).
 - RRF fusion with Canonical Artist tracking to mitigate IDF dilution.
 - Supports server-side pagination.
 """
@@ -12,7 +12,7 @@ Core Hybrid Search Engine for the Tate dataset.
 import os
 import re
 import string
-# import time
+import json
 from collections import Counter
 from typing import Optional, Dict, Any, List, Set, Tuple
 
@@ -22,7 +22,6 @@ import torch
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
-# Optional Levenshtein import for spelling suggestions
 try:
     import Levenshtein as _lev
 
@@ -31,12 +30,17 @@ except ImportError:
     _lev = None
     _LEV_AVAILABLE = False
 
+# Old cache (doc-level) kept for backwards compatibility
 VECTOR_CACHE = "embeddings.npy"
+
+# NEW caches for chunked dense
+CHUNK_EMB_CACHE = "chunk_embeddings.npy"
+CHUNK_MAP_CACHE = "chunk_to_doc.npy"
+
 DENSE_MODEL_ID = "all-MiniLM-L6-v2"
 
 
 def normalize_query(text: str) -> str:
-    """Normalize input for case-insensitive search and fair tokenization."""
     if not isinstance(text, str):
         return ""
     text = text.lower().replace("-", " ")
@@ -45,17 +49,12 @@ def normalize_query(text: str) -> str:
 
 
 def extract_surname(artist: str) -> str:
-    """
-    Extract the surname from artist metadata.
-    E.g., 'Turner, Joseph Mallord William' -> 'turner'
-    """
     if not artist:
         return ""
     return artist.split(",")[0].strip().lower()
 
 
 def normalize_artist_name(name: str) -> str:
-    """Normalize artist names: lower, remove punctuation, collapse whitespace."""
     s = name.lower()
     s = s.translate(str.maketrans("", "", string.punctuation))
     s = re.sub(r"\s+", " ", s).strip()
@@ -63,30 +62,28 @@ def normalize_artist_name(name: str) -> str:
 
 
 class ArtGallerySearchEngine:
-    """Hybrid Search Engine combining Lexical (BM25) and Semantic retrieval."""
-
     def __init__(self, data_path: str):
         print("[INFO] Loading Document Store...")
         self.df = pd.read_csv(data_path)
         for col in self.df.columns:
             self.df[col] = self.df[col].fillna("").astype(str)
 
-        # Add explicit surname search field for BM25 anchoring
         self.df["search_artist_surname"] = self.df["artist"].apply(extract_surname)
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.vocabulary: Set[str] = set()
         self.bm25: Optional[BM25Okapi] = None
         self.dense_model: Optional[SentenceTransformer] = None
+
+        # Dense indexes (chunked)
         self.document_embeddings: Optional[np.ndarray] = None
+        self.chunk_embeddings: Optional[np.ndarray] = None
+        self.chunk_to_doc_idx: Optional[np.ndarray] = None
 
         self._build_indexes()
-
-        # Identify the dominant artist for every surname to handle ambiguous queries
         self.primary_artist_for_surname = self._build_canonical_artist_index()
 
     def _build_indexes(self) -> None:
-        """Build fielded BM25, dense model embeddings, and spelling vocabulary."""
         print("[INFO] Building Fielded Sparse Index (Artist Surname Priority)...")
         bm25_corpus = [
             (
@@ -130,43 +127,90 @@ class ArtGallerySearchEngine:
                 )
         print("[SUCCESS] All retrieval indexes are online.")
 
+    def _load_or_build_chunk_index(self) -> None:
+        # If the ingestion hasn't been updated, fall back to doc-level embeddings
+        has_chunks = "description_chunks" in self.df.columns
+
+        if os.path.exists(CHUNK_EMB_CACHE) and os.path.exists(CHUNK_MAP_CACHE):
+            print(f"[CACHE] Loading chunk embeddings from {CHUNK_EMB_CACHE}...")
+            self.chunk_embeddings = np.load(CHUNK_EMB_CACHE)
+            self.chunk_to_doc_idx = np.load(CHUNK_MAP_CACHE)
+            return
+
+        if not has_chunks:
+            # Fallback: create one chunk per doc from semantic_blob
+            print(
+                "[WARN] description_chunks not found; falling back to semantic_blob as single chunk per doc."
+            )
+            all_chunks = self.df["semantic_blob"].tolist()
+            self.chunk_to_doc_idx = np.arange(len(self.df), dtype=np.int32)
+        else:
+            all_chunks: list[str] = []
+            mapping: list[int] = []
+            for doc_idx, chunks_json in enumerate(
+                self.df["description_chunks"].tolist()
+            ):
+                try:
+                    chunks = json.loads(chunks_json) if chunks_json else []
+                except Exception:
+                    chunks = []
+                if not chunks:
+                    chunks = [self.df.iloc[doc_idx].get("semantic_blob", "")]
+                for c in chunks:
+                    all_chunks.append(str(c))
+                    mapping.append(doc_idx)
+            self.chunk_to_doc_idx = np.array(mapping, dtype=np.int32)
+
+        print("[INFO] Computing chunk embeddings (first run)...")
+        assert self.dense_model is not None
+
+        self.chunk_embeddings = self.dense_model.encode(
+            all_chunks,
+            batch_size=128,
+            show_progress_bar=True,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        ).astype(np.float32)
+        self.document_embeddings = self.chunk_embeddings
+
+        np.save(CHUNK_EMB_CACHE, self.chunk_embeddings)
+        np.save(CHUNK_MAP_CACHE, self.chunk_to_doc_idx)
+        print(
+            f"[CACHE] Saved chunk embeddings to {CHUNK_EMB_CACHE} and mapping to {CHUNK_MAP_CACHE}."
+        )
+
     def _build_canonical_artist_index(self) -> Dict[str, str]:
-        """Map each surname to the most common normalized full artist name in the corpus."""
         lookup: Dict[str, List[str]] = {}
         for artist in self.df["artist"]:
             surname = extract_surname(artist)
             norm_artist = normalize_artist_name(artist)
             lookup.setdefault(surname, []).append(norm_artist)
 
-        result = {}
+        result: Dict[str, str] = {}
         for surname, norm_names in lookup.items():
             most_common, _ = Counter(norm_names).most_common(1)[0]
             result[surname] = most_common
         return result
 
     def _deduplicate(self, ranked_indices: List[int]) -> List[int]:
-        """Deduplicate results by Title, Artist, and Year to hide identical print runs."""
         seen: Set[Tuple[str, str, str]] = set()
         deduped: List[int] = []
         for idx in ranked_indices:
             doc = self.df.iloc[idx]
-            title_norm = str(doc.get("title", "")).strip().lower()
-            artist_norm = str(doc.get("artist", "")).strip().lower()
-            year_norm = str(doc.get("year", "")).strip()
-
-            fingerprint = (title_norm, artist_norm, year_norm)
+            fingerprint = (
+                str(doc.get("title", "")).strip().lower(),
+                str(doc.get("artist", "")).strip().lower(),
+                str(doc.get("year", "")).strip(),
+            )
             if fingerprint not in seen:
                 seen.add(fingerprint)
                 deduped.append(idx)
-
         return deduped
 
     def _is_canonical_artist(self, artist_raw: str, canonical: str) -> bool:
-        """Check if the given record belongs to the dominant artist for that surname."""
         return normalize_artist_name(artist_raw) == canonical
 
     def suggest_correction(self, query: str) -> Optional[str]:
-        """Suggest spelling correction using Levenshtein distance."""
         if not self.vocabulary or not _LEV_AVAILABLE or _lev is None:
             return None
         lev = _lev
@@ -190,7 +234,6 @@ class ArtGallerySearchEngine:
         return " ".join(suggested) if changed else None
 
     def search_sparse(self, query: str, top_k: int = 20000) -> Dict[int, int]:
-        """Lexical BM25 search."""
         if self.bm25 is None:
             return {}
         scores = self.bm25.get_scores(normalize_query(query).split())
@@ -200,21 +243,36 @@ class ArtGallerySearchEngine:
         }
 
     def search_dense(self, query: str, top_k: int = 20000) -> Dict[int, int]:
-        """Semantic search over embeddings."""
-        if self.dense_model is None or self.document_embeddings is None:
+        """
+        Chunked dense retrieval:
+        - score each chunk vs query
+        - max pool chunk scores back to document score
+        - rank documents by pooled score
+        """
+        if (
+            self.dense_model is None
+            or self.chunk_embeddings is None
+            or self.chunk_to_doc_idx is None
+        ):
             return {}
+
         q_vec = self.dense_model.encode(
             [query], convert_to_numpy=True, normalize_embeddings=True
-        )
-        scores = np.dot(self.document_embeddings, q_vec.T).flatten()
-        top_indices = np.argsort(scores)[::-1][:top_k]
+        ).astype(np.float32)
+        chunk_scores = np.dot(self.chunk_embeddings, q_vec.T).flatten()
+
+        doc_scores = np.full(len(self.df), -1e9, dtype=np.float32)
+        np.maximum.at(doc_scores, self.chunk_to_doc_idx, chunk_scores)
+
+        top_indices = np.argsort(doc_scores)[::-1][:top_k]
         return {
-            int(idx): rank for rank, idx in enumerate(top_indices) if scores[idx] > 0.25
+            int(idx): rank
+            for rank, idx in enumerate(top_indices)
+            if doc_scores[idx] > 0.25
         }
 
     @staticmethod
     def _is_junk(title_lower: str, medium_lower: str, query_lower: str) -> bool:
-        """Filter out obvious metadata fragments and unclassified records."""
         if title_lower.strip().startswith("[") or re.search(r"\[.+\]", title_lower):
             return True
         for kw in ["inscription", "list of", "blank", "recto", "verso"]:
@@ -226,7 +284,6 @@ class ArtGallerySearchEngine:
 
     @staticmethod
     def _artist_word_match(query_words: set, artist_lower: str) -> bool:
-        """Verify if any whole word in the query matches the artist name."""
         return any(
             re.search(rf"\b{re.escape(word)}\b", artist_lower) for word in query_words
         )
@@ -239,10 +296,6 @@ class ArtGallerySearchEngine:
         page: int = 1,
         per_page: int = 10,
     ) -> Dict[str, Any]:
-        """
-        Paginated hybrid retrieval combining BM25, Dense vectors, and Intent Multipliers.
-        """
-        # start_time = time.perf_counter()
         suggestion = self.suggest_correction(query)
 
         sparse_ranks = self.search_sparse(query, top_k=top_k)
@@ -256,7 +309,6 @@ class ArtGallerySearchEngine:
         lastname = query_lower.strip()
         canonical_artist = self.primary_artist_for_surname.get(lastname)
 
-        # Multipliers and Penalties to align math with human intent
         canonical_boost = 15.0
         true_artist_boost = 5.0
         tier1_medium_boost = 5.0
@@ -268,7 +320,6 @@ class ArtGallerySearchEngine:
         tier1_media = ["oil", "canvas", "sculpture", "marble", "acrylic", "watercolour"]
         tier2_media = ["engraving", "etching", "lithograph"]
 
-        # Phase 1: Score all candidates
         for idx in set(sparse_ranks.keys()) | set(dense_ranks.keys()):
             s_rank = sparse_ranks.get(idx, 25000)
             d_rank = dense_ranks.get(idx, 25000)
@@ -296,7 +347,6 @@ class ArtGallerySearchEngine:
                 and self._is_canonical_artist(artist_raw, canonical_artist)
             )
 
-            # Apply Logic Multipliers
             if is_canonical:
                 multiplier *= canonical_boost
             elif is_true_artist:
@@ -315,7 +365,6 @@ class ArtGallerySearchEngine:
 
             fused_scores[idx] = base_score * multiplier
 
-        # Phase 2: Sort and Deduplicate
         initial_ranking = sorted(
             (idx for idx in fused_scores if fused_scores[idx] >= 0),
             key=lambda x: fused_scores[x],
@@ -323,7 +372,6 @@ class ArtGallerySearchEngine:
         )
         deduped_indices = self._deduplicate(initial_ranking)
 
-        # Phase 3: Build detailed result objects
         all_results: List[Dict[str, Any]] = []
         for idx in deduped_indices:
             doc = self.df.iloc[idx]
@@ -355,8 +403,6 @@ class ArtGallerySearchEngine:
                 }
             )
 
-        # Phase 4: Canonical Override (The "Hard Shield")
-        # Forces the dominant artist to the absolute top of the list for surname searches.
         if query_is_single_word and canonical_artist:
             canonical_results = [
                 r
@@ -370,7 +416,6 @@ class ArtGallerySearchEngine:
             ]
             all_results = canonical_results + other_results
 
-        # Phase 5: Pagination
         total_results = len(all_results)
         total_pages = max(1, (total_results + per_page - 1) // per_page)
         page = max(1, min(page, total_pages))
@@ -379,7 +424,6 @@ class ArtGallerySearchEngine:
         end_idx = start_idx + per_page
         results_page = all_results[start_idx:end_idx]
 
-        # print(f"[TIMING] Hybrid Retrieval: {time.perf_counter() - start_time:.4f}s")
         return {
             "results": results_page,
             "page": page,

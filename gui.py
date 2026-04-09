@@ -9,10 +9,13 @@ PyQt6 GUI for the Tate Art Search Engine.
 - User-friendly/robust for PyInstaller EXE builds on Windows.
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import time
 import base64
+import html
 import requests
 import webbrowser
 from typing import Optional, Dict, Any
@@ -142,6 +145,8 @@ class ArtSearchGUI(QMainWindow):
         self.engine_thread.error_occurred.connect(self._on_engine_error)
         self.engine_thread.start()
 
+        self.task_thread: Optional[SystemTaskThread] = None
+
     def apply_styling(self):
         """Sets unified stylesheet for all widgets."""
         self.setStyleSheet("""
@@ -182,9 +187,11 @@ class ArtSearchGUI(QMainWindow):
         lbl.setStyleSheet(
             "font-weight: bold; color: #555; font-size: 11px; margin-bottom: 5px;"
         )
+
         self.history_list = QListWidget()
         self.history_list.itemClicked.connect(self._on_history_clicked)
         self.history_list.setFixedWidth(220)
+
         self.btn_clear = QPushButton("Clear History")
         self.btn_clear.setObjectName("clearBtn")
         self.btn_clear.clicked.connect(self.history_list.clear)
@@ -201,6 +208,7 @@ class ArtSearchGUI(QMainWindow):
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search the archives or type /help...")
         self.search_input.returnPressed.connect(self.perform_search)
+
         self.btn_search = QPushButton("Search")
         self.btn_search.clicked.connect(self.perform_search)
         nav_top.addWidget(self.search_input)
@@ -494,13 +502,15 @@ class ArtSearchGUI(QMainWindow):
             row += (
                 "</td></tr></table><hr style='border:none; border-top:1px solid #222;'>"
             )
-            html += row
+
+            html_out += row
 
         self.results_area.setHtml(html)
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(ICON_PATH))
     window = ArtSearchGUI()
     window.show()
     sys.exit(app.exec())
