@@ -100,8 +100,21 @@ class ArtGallerySearchEngine:
         print(f"[INFO] Initializing dense retriever on {self.device.upper()}...")
         self.dense_model = SentenceTransformer(DENSE_MODEL_ID, device=self.device)
 
-        # Build or load chunked dense index
-        self._load_or_build_chunk_index()
+        if os.path.exists(VECTOR_CACHE):
+            print(f"[CACHE] Loading embeddings from {VECTOR_CACHE}...")
+            self.document_embeddings = np.load(VECTOR_CACHE)
+        else:
+            print("[INFO] Computing semantic embeddings (first run)...")
+            semantic_corpus = self.df["semantic_blob"].tolist()
+            self.document_embeddings = self.dense_model.encode(
+                semantic_corpus,
+                batch_size=128,
+                # show_progress_bar=True,
+                show_progress_bar=False,  # Explicitly disable tqdm initialization for .exe
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
+            np.save(VECTOR_CACHE, self.document_embeddings)
 
         print("[INFO] Building Spelling Vocabulary...")
         title_artists = (

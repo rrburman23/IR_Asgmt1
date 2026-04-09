@@ -1,38 +1,29 @@
 # Art Gallery Hybrid Search Engine
 
-This repository contains the codebase for Assignment 1 (Information Retrieval ECS736P/U). It implements a dual-pipeline search engine for a curated corpus of Tate Gallery artwork, following a practical IR architecture with sparse retrieval, dense retrieval, and RRF fusion.
+This repository contains the codebase for Assignment 1 (Information Retrieval ECS736P/U). It implements a dual-pipeline search engine for a curated corpus of Tate Gallery artwork, following a practical IR architecture with sparse retrieval, dense retrieval, and intent-based re-ranking.
 
 ## Project Structure
 
 ```text
 .
+├── gui.py                # Main Entry Point: PyQt6 Interface with QThread logic
+├── hybrid_search.py      # Core Search Engine: BM25 + Dense + RRF + Intent Shields
 ├── ingest_data.py        # ETL pipeline (download, clean, normalize CSV)
-├── hybrid_search.py      # Core search engine: BM25 + Dense + RRF
-├── main.py               # GUI/CLI entry point, auto-ingest, mode router
-├── evaluate_engine.py    # Evaluation (MRR, NDCG@10)
+├── main.py               # Central Dispatcher: Handles routing for GUI, CLI, and Testing
+├── evaluate_engine.py    # Evaluation suite (MRR, NDCG@10)
 ├── test_engine.py        # Unit and latency tests
-├── requirements.txt      # Python dependencies (CPU/CUDA compatible)
-└── art_gallery_data.csv  # Local search-ready dataset
+├── requirements.txt      # Python dependencies (Optimized for CPU-only builds)
+└── Tate Search.spec      # PyInstaller build specification
 ```
 
 ## Architecture Overview
 
-- Sparse indexing: `rank_bm25` over title/artist fields for known-item lookup.
-- Dense indexing: `sentence-transformers` (`all-MiniLM-L6-v2`) for semantic retrieval.
-- Fusion: Reciprocal Rank Fusion (RRF).
-- Curator boost: optional business weighting to promote finalized masterpieces and demote archival fragments.
-- Interfaces: PyQt6 GUI and CLI, with ETL, tests, and evaluation scripts.
-- Pagination: results are served in pages with Previous/Next navigation controls in the GUI.
-
-## Logical System Architecture
-
-```text
-OFFLINE PIPELINE
-Remote CSV Source -> ingest_data.py -> BM25 Index + Dense Embeddings -> art_gallery_data.csv
-
-ONLINE PIPELINE
-User (GUI/CLI) -> Query Processing -> Sparse Retrieval + Dense Retrieval -> RRF Fusion -> Top-K Results
-```
+- **Sparse Indexing:** rank_bm25 over artist and title fields. The artist surname is heavily weighted (x50) to act as a primary anchor for known-item lookups.
+- **Dense Indexing:** Sentence-transformers (all-MiniLM-L6-v2) used for semantic retrieval over the semantic_blob field.
+- **Asynchronous Execution:** Background workers (QThread) handle model loading and vector math to prevent GUI thread blockage and ensure high responsiveness.
+- **Intent-Based Shields (Soft):** Multipliers applied to finished oil paintings and canonical artists while penalizing archival fragments.
+- **Intent-Based Shields (Hard):** A canonical override that enforces dominant artist results (e.g., J.M.W. Turner) to lead single-word surname searches.
+- **System Stability:** Native OS stream redirection ensures stability in windowed executable environments.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -102,71 +93,88 @@ User (GUI/CLI) -> Query Processing -> Sparse Retrieval + Dense Retrieval -> RRF 
 
 ### 1. Install Dependencies
 
-You need Python 3.9+.
-
-Standard install:
+The project uses a CPU-optimized version of PyTorch to minimize environment footprint and ensure compatibility across standard laptop hardware.
 
 ```bash
 pip install -r requirements.txt
 ```
 
-- The appropriate PyTorch build is installed automatically.
-- SentenceTransformers selects CPU or GPU automatically.
+### 2. Launching and Commands
 
-Advanced (force CUDA 12.1 build):
+The system can be controlled via terminal flags or internal slash commands within the search interfaces.
 
-```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-```
-
-### 2. Launch the Search Engine
-
-Start GUI mode:
+**Start the Graphical Interface (Default):**
 
 ```bash
 python main.py
 ```
 
-Other modes:
+**Launch the Command Line Interface (CLI):**
 
-- CLI mode: `python main.py --cli`
-- Run tests: `python main.py --test`
-- Run evaluation: `python main.py --evaluate`
+```bash
+python main.py --cli
+```
 
-### 3. Manual Data ETL (Optional)
+**Unified Slash Commands:**
+The following commands can be typed directly into the search box in either the GUI or CLI:
+
+- `/help`     : Displays the system manual and available commands.
+- `/test`     : Triggers the automated unit tests and latency benchmarks.
+- `/evaluate` : Runs the evaluation suite to calculate MRR and NDCG metrics.
+- `/exit`     : Safely terminates the application and closes data streams.
+
+### 3. Testing and Evaluation via Terminal
+
+You can bypass the interfaces to run system checks directly from your terminal:
+
+**Run System Tests:**
+
+```bash
+python main.py --test
+```
+
+**Run Evaluation Suite:**
+
+```bash
+python main.py --evaluate
+```
+
+### 4. Manual Data ETL (Optional)
+
+The ingestion pipeline runs automatically if data is missing, but can be triggered manually:
 
 ```bash
 python ingest_data.py
 ```
 
-### 4. Unit Tests
+## Distribution and Executable
 
-```bash
-python test_engine.py
-```
+A standalone Windows executable is available for this project.
 
-### 5. System Evaluation
+**Note on Repository Hosting:**
+The `dist/` and `build/` folders are not tracked in this repository to prevent binary bloat. The large pre-computed embedding matrix (`embeddings.npy`) is excluded from the main branch due to GitHub's file size limitations.
 
-```bash
-python evaluate_engine.py
-```
+### Releases
 
-## Evaluation Metrics
+A compiled, portable version of the application is hosted under the **Releases** section of this repository.
 
-- MRR (Mean Reciprocal Rank): known-item retrieval effectiveness.
-- NDCG@10 (Normalized Discounted Cumulative Gain): semantic ranking quality in top results.
+### Running the Executable
 
-## Hardware Notes
+1. Download the zipped release folder.
+2. Ensure `art_gallery_data.csv` and `embeddings.npy` are located in the root directory of the extracted folder.
+3. Launch `Tate Gallery Search Engine.exe`.
 
-- Runs on both CPU and GPU.
-- No manual CUDA configuration is required for most users.
-- If CUDA is available, dense retrieval uses GPU automatically.
+## Hardware Performance
+
+- The engine supports both CPU and GPU execution.
+- On standard laptops without dedicated GPUs, the initial search may incur a "cold start" delay of 5-10 seconds as the 106MB embedding matrix is mapped to system RAM.
+- Subsequent searches utilize cached memory and typically execute in sub-100ms.
 
 ## References
 
-- [Sentence Transformers Documentation](https://www.sbert.net/)
-- [PyQt6 Documentation](https://doc.qt.io/qtforpython-6/)
-- [Rank-BM25 Project](https://github.com/dorianbrown/rank_bm25)
-- [RRF Paper](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)
+- Sentence Transformers (all-MiniLM-L6-v2)
+- Reciprocal Rank Fusion (Cormack et al.)
+- rank_bm25 (Okapi implementation)
+- PyQt6 Event Loop Architecture
 
 (c) 2026. ECS736P/U, Queen Mary University of London
