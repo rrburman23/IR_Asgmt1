@@ -112,7 +112,8 @@ class ArtGallerySearchEngine:
             self.document_embeddings = self.dense_model.encode(
                 semantic_corpus,
                 batch_size=128,
-                show_progress_bar=True,
+                # show_progress_bar=True,
+                show_progress_bar=False,  # Explicitly disable tqdm initialization for .exe
                 convert_to_numpy=True,
                 normalize_embeddings=True,
             )
