@@ -12,7 +12,7 @@ Core Hybrid Search Engine for the Tate dataset.
 import os
 import re
 import string
-import time
+# import time
 from collections import Counter
 from typing import Optional, Dict, Any, List, Set, Tuple
 

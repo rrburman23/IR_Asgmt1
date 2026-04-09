@@ -164,3 +164,4 @@ cython_debug/
 # Data and Embeddings
 *.npy
 *.csv
+embeddings.npy

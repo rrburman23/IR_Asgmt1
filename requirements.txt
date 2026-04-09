@@ -1,6 +1,4 @@
 torch
-torchvision
-torchaudio
 pandas
 numpy
 PyQt6
