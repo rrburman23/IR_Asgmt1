@@ -82,7 +82,7 @@ def process_and_filter(input_file, output_file, sample_size=70000):
     for col in keep:
         df[col] = df[col].fillna("").astype(str)
 
-    # 2. Fix the Dead Tate URLs by pointing to the new CDN
+    # 2. Dead Tate URLs point to the new CDN
     df["thumbnailurl"] = df["thumbnailurl"].str.replace(
         "http://www.tate.org.uk", "https://media.tate.org.uk"
     )

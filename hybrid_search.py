@@ -2,17 +2,19 @@
 File Name: hybrid_search.py
 
 Description:
-- Hybrid retrieval/search over Tate artworks using fielded BM25 and dense retrieval.
-- Strongly weighted surname anchor for IR robustness (IDF dilution mitigation).
-- Canonical artist scoring (not brute force).
-- Supports server-side pagination (page/per_page arguments to hybrid_search).
+Core Hybrid Search Engine for the Tate dataset.
+- Fielded BM25 with surname strong weighting.
+- Dense retrieval via SentenceTransformers.
+- RRF fusion with Canonical Artist tracking to mitigate IDF dilution.
+- Supports server-side pagination.
 """
 
 import os
 import re
+import string
 import time
-from typing import Optional, Dict, Any, List, Set, Tuple
 from collections import Counter
+from typing import Optional, Dict, Any, List, Set, Tuple
 
 import pandas as pd
 import numpy as np
@@ -20,6 +22,7 @@ import torch
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
+# Optional Levenshtein import for spelling suggestions
 try:
     import Levenshtein as _lev
 
@@ -33,9 +36,7 @@ DENSE_MODEL_ID = "all-MiniLM-L6-v2"
 
 
 def normalize_query(text: str) -> str:
-    """
-    Normalize input text for robust BM25 and semantic matching.
-    """
+    """Normalize input for case-insensitive search and fair tokenization."""
     if not isinstance(text, str):
         return ""
     text = text.lower().replace("-", " ")
@@ -45,8 +46,8 @@ def normalize_query(text: str) -> str:
 
 def extract_surname(artist: str) -> str:
     """
-    Extract and normalize the surname from artist metadata.
-    E.g.: "Turner, Joseph Mallord William" -> "turner"
+    Extract the surname from artist metadata.
+    E.g., 'Turner, Joseph Mallord William' -> 'turner'
     """
     if not artist:
         return ""
@@ -54,12 +55,7 @@ def extract_surname(artist: str) -> str:
 
 
 def normalize_artist_name(name: str) -> str:
-    """
-    Lowercase, remove punctuation, collapse whitespace.
-    Used for comparing artists in deduplication/canonical logic.
-    """
-    import string
-
+    """Normalize artist names: lower, remove punctuation, collapse whitespace."""
     s = name.lower()
     s = s.translate(str.maketrans("", "", string.punctuation))
     s = re.sub(r"\s+", " ", s).strip()
@@ -67,35 +63,30 @@ def normalize_artist_name(name: str) -> str:
 
 
 class ArtGallerySearchEngine:
+    """Hybrid Search Engine combining Lexical (BM25) and Semantic retrieval."""
+
     def __init__(self, data_path: str):
         print("[INFO] Loading Document Store...")
         self.df = pd.read_csv(data_path)
         for col in self.df.columns:
             self.df[col] = self.df[col].fillna("").astype(str)
 
+        # Add explicit surname search field for BM25 anchoring
         self.df["search_artist_surname"] = self.df["artist"].apply(extract_surname)
+
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.vocabulary: Set[str] = set()
         self.bm25: Optional[BM25Okapi] = None
         self.dense_model: Optional[SentenceTransformer] = None
         self.document_embeddings: Optional[np.ndarray] = None
+
         self._build_indexes()
+
+        # Identify the dominant artist for every surname to handle ambiguous queries
         self.primary_artist_for_surname = self._build_canonical_artist_index()
 
-        print(
-            "Dominant artist per surname (example):",
-            {
-                k: v
-                for k, v in self.primary_artist_for_surname.items()
-                if k in ["turner", "blake", "black"]
-            },
-        )
-
-    def _build_indexes(self):
-        """
-        Build weighted fielded BM25 and dense vector index.
-        Surname gets maximal weight.
-        """
+    def _build_indexes(self) -> None:
+        """Build fielded BM25, dense model embeddings, and spelling vocabulary."""
         print("[INFO] Building Fielded Sparse Index (Artist Surname Priority)...")
         bm25_corpus = [
             (
@@ -111,6 +102,7 @@ class ArtGallerySearchEngine:
 
         print(f"[INFO] Initializing dense retriever on {self.device.upper()}...")
         self.dense_model = SentenceTransformer(DENSE_MODEL_ID, device=self.device)
+
         if os.path.exists(VECTOR_CACHE):
             print(f"[CACHE] Loading embeddings from {VECTOR_CACHE}...")
             self.document_embeddings = np.load(VECTOR_CACHE)
@@ -138,14 +130,13 @@ class ArtGallerySearchEngine:
         print("[SUCCESS] All retrieval indexes are online.")
 
     def _build_canonical_artist_index(self) -> Dict[str, str]:
-        """
-        For each surname, get the most common normalized full artist name.
-        """
-        lookup = {}
+        """Map each surname to the most common normalized full artist name in the corpus."""
+        lookup: Dict[str, List[str]] = {}
         for artist in self.df["artist"]:
             surname = extract_surname(artist)
             norm_artist = normalize_artist_name(artist)
             lookup.setdefault(surname, []).append(norm_artist)
+
         result = {}
         for surname, norm_names in lookup.items():
             most_common, _ = Counter(norm_names).most_common(1)[0]
@@ -153,57 +144,52 @@ class ArtGallerySearchEngine:
         return result
 
     def _deduplicate(self, ranked_indices: List[int]) -> List[int]:
-        """
-        Deduplicate results by (normalized title, normalized artist).
-        """
-        seen: Set[Tuple[str, str]] = set()
+        """Deduplicate results by Title, Artist, and Year to hide identical print runs."""
+        seen: Set[Tuple[str, str, str]] = set()
         deduped: List[int] = []
         for idx in ranked_indices:
             doc = self.df.iloc[idx]
-            title_norm = doc["title"].strip().lower()
-            artist_norm = doc["artist"].strip().lower()
-            key = (title_norm, artist_norm)
-            if key not in seen:
-                seen.add(key)
+            title_norm = str(doc.get("title", "")).strip().lower()
+            artist_norm = str(doc.get("artist", "")).strip().lower()
+            year_norm = str(doc.get("year", "")).strip()
+
+            fingerprint = (title_norm, artist_norm, year_norm)
+            if fingerprint not in seen:
+                seen.add(fingerprint)
                 deduped.append(idx)
+
         return deduped
 
     def _is_canonical_artist(self, artist_raw: str, canonical: str) -> bool:
-        """
-        True if the given record is by the canonical artist for the surname.
-        """
+        """Check if the given record belongs to the dominant artist for that surname."""
         return normalize_artist_name(artist_raw) == canonical
 
     def suggest_correction(self, query: str) -> Optional[str]:
-        """
-        Suggest spelling correction using Levenshtein distance.
-        """
-        if not self.vocabulary or not _LEV_AVAILABLE:
+        """Suggest spelling correction using Levenshtein distance."""
+        if not self.vocabulary or not _LEV_AVAILABLE or _lev is None:
             return None
         lev = _lev
-        if lev is None:
-            return None
+
         suggested, changed = [], False
         for word in query.split():
             clean = re.sub(r"[^a-zA-Z]", "", word.lower())
             if not clean or len(clean) < 4 or clean in self.vocabulary:
                 suggested.append(word)
                 continue
+
             closest = min(
                 self.vocabulary, key=lambda w: (lev.distance(clean, w), -len(w))
             )
-            dist = lev.distance(clean, closest)
-            if dist <= 2:
+            if lev.distance(clean, closest) <= 2:
                 suggested.append(closest)
                 changed = True
             else:
                 suggested.append(word)
+
         return " ".join(suggested) if changed else None
 
     def search_sparse(self, query: str, top_k: int = 20000) -> Dict[int, int]:
-        """
-        BM25 search on surname + artist + title + medium.
-        """
+        """Lexical BM25 search."""
         if self.bm25 is None:
             return {}
         scores = self.bm25.get_scores(normalize_query(query).split())
@@ -213,9 +199,7 @@ class ArtGallerySearchEngine:
         }
 
     def search_dense(self, query: str, top_k: int = 20000) -> Dict[int, int]:
-        """
-        Dense retrieval (semantic search) on semantic_blob.
-        """
+        """Semantic search over embeddings."""
         if self.dense_model is None or self.document_embeddings is None:
             return {}
         q_vec = self.dense_model.encode(
@@ -229,12 +213,8 @@ class ArtGallerySearchEngine:
 
     @staticmethod
     def _is_junk(title_lower: str, medium_lower: str, query_lower: str) -> bool:
-        """
-        Filter out junk/archival/fragment records.
-        """
-        if title_lower.strip().startswith("["):
-            return True
-        if re.search(r"\[.+\]", title_lower):
+        """Filter out obvious metadata fragments and unclassified records."""
+        if title_lower.strip().startswith("[") or re.search(r"\[.+\]", title_lower):
             return True
         for kw in ["inscription", "list of", "blank", "recto", "verso"]:
             if kw in title_lower and kw not in query_lower:
@@ -245,9 +225,7 @@ class ArtGallerySearchEngine:
 
     @staticmethod
     def _artist_word_match(query_words: set, artist_lower: str) -> bool:
-        """
-        True if any whole word in the query matches the artist.
-        """
+        """Verify if any whole word in the query matches the artist name."""
         return any(
             re.search(rf"\b{re.escape(word)}\b", artist_lower) for word in query_words
         )
@@ -255,28 +233,29 @@ class ArtGallerySearchEngine:
     def hybrid_search(
         self,
         query: str,
-        top_k: int = 100,
+        top_k: int = 10000,
         k_rrf: int = 60,
         page: int = 1,
         per_page: int = 10,
     ) -> Dict[str, Any]:
         """
-        Paginated hybrid IR (BM25 + dense + canonical artist boost).
-        Returns paginated dict: results, page, per_page, total_results, total_pages, suggestion.
+        Paginated hybrid retrieval combining BM25, Dense vectors, and Intent Multipliers.
         """
-        start_time = time.perf_counter()
+        # start_time = time.perf_counter()
         suggestion = self.suggest_correction(query)
-        sparse_ranks = self.search_sparse(query, top_k=20000)
-        dense_ranks = self.search_dense(query, top_k=20000)
+
+        sparse_ranks = self.search_sparse(query, top_k=top_k)
+        dense_ranks = self.search_dense(query, top_k=top_k)
 
         fused_scores: Dict[int, float] = {}
         query_lower = query.lower()
         query_words = set(query_lower.split())
         query_is_single_word = len(query_words) == 1
-        lastname = query_lower.strip()
-        canonical = self.primary_artist_for_surname.get(lastname)
 
-        # Tuneable multipliers/penalties
+        lastname = query_lower.strip()
+        canonical_artist = self.primary_artist_for_surname.get(lastname)
+
+        # Multipliers and Penalties to align math with human intent
         canonical_boost = 15.0
         true_artist_boost = 5.0
         tier1_medium_boost = 5.0
@@ -288,13 +267,10 @@ class ArtGallerySearchEngine:
         tier1_media = ["oil", "canvas", "sculpture", "marble", "acrylic", "watercolour"]
         tier2_media = ["engraving", "etching", "lithograph"]
 
-        # Score and collect all possible candidates
+        # Phase 1: Score all candidates
         for idx in set(sparse_ranks.keys()) | set(dense_ranks.keys()):
-            s_rank = sparse_ranks.get(idx, 1000)
-            d_rank = dense_ranks.get(idx, 1000)
-            if s_rank > 500 and d_rank > 50:
-                fused_scores[idx] = -1.0
-                continue
+            s_rank = sparse_ranks.get(idx, 25000)
+            d_rank = dense_ranks.get(idx, 25000)
 
             doc = self.df.iloc[idx]
             title_lower = doc["title"].lower()
@@ -315,27 +291,30 @@ class ArtGallerySearchEngine:
             user_wants_depiction = any(d in query_lower for d in depiction_phrases)
             is_canonical = (
                 query_is_single_word
-                and canonical
-                and self._is_canonical_artist(artist_raw, canonical)
+                and canonical_artist
+                and self._is_canonical_artist(artist_raw, canonical_artist)
             )
 
-            # Scoring logic
+            # Apply Logic Multipliers
             if is_canonical:
                 multiplier *= canonical_boost
             elif is_true_artist:
                 multiplier *= true_artist_boost
+
             if any(m in medium_lower for m in tier1_media):
                 multiplier *= tier1_medium_boost
             elif any(m in medium_lower for m in tier2_media):
                 multiplier *= tier2_medium_boost
+
             if is_depiction and not user_wants_depiction:
                 multiplier *= depiction_penalty
+
             if title_mentions_query and not is_true_artist:
                 multiplier *= subject_only_penalty
 
             fused_scores[idx] = base_score * multiplier
 
-        # Sort, deduplicate before pagination
+        # Phase 2: Sort and Deduplicate
         initial_ranking = sorted(
             (idx for idx in fused_scores if fused_scores[idx] >= 0),
             key=lambda x: fused_scores[x],
@@ -343,7 +322,7 @@ class ArtGallerySearchEngine:
         )
         deduped_indices = self._deduplicate(initial_ranking)
 
-        # Collect all results (to support correct paging + total_pages/total_results)
+        # Phase 3: Build detailed result objects
         all_results: List[Dict[str, Any]] = []
         for idx in deduped_indices:
             doc = self.df.iloc[idx]
@@ -352,6 +331,7 @@ class ArtGallerySearchEngine:
                 reasons.append(f"Keyword (Rank {sparse_ranks[idx] + 1})")
             if idx in dense_ranks and dense_ranks[idx] < 20:
                 reasons.append(f"AI Context (Rank {dense_ranks[idx] + 1})")
+
             all_results.append(
                 {
                     "Rank": len(all_results) + 1,
@@ -373,30 +353,32 @@ class ArtGallerySearchEngine:
                     "Suggestion": suggestion,
                 }
             )
-            if len(all_results) >= top_k:
-                break
-        
-        # --- Canonical override for single-word surname queries ---
-        if query_is_single_word and canonical:
+
+        # Phase 4: Canonical Override (The "Hard Shield")
+        # Forces the dominant artist to the absolute top of the list for surname searches.
+        if query_is_single_word and canonical_artist:
             canonical_results = [
-                r for r in all_results
-                if normalize_artist_name(r["Artist"]) == canonical
+                r
+                for r in all_results
+                if normalize_artist_name(r["Artist"]) == canonical_artist
             ]
             other_results = [
-                r for r in all_results
-                if normalize_artist_name(r["Artist"]) != canonical
+                r
+                for r in all_results
+                if normalize_artist_name(r["Artist"]) != canonical_artist
             ]
             all_results = canonical_results + other_results
 
-        # Pagination logic
+        # Phase 5: Pagination
         total_results = len(all_results)
         total_pages = max(1, (total_results + per_page - 1) // per_page)
         page = max(1, min(page, total_pages))
+
         start_idx = (page - 1) * per_page
         end_idx = start_idx + per_page
         results_page = all_results[start_idx:end_idx]
 
-        print(f"[TIMING] Hybrid Retrieval: {time.perf_counter() - start_time:.4f}s")
+        # print(f"[TIMING] Hybrid Retrieval: {time.perf_counter() - start_time:.4f}s")
         return {
             "results": results_page,
             "page": page,
