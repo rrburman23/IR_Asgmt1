@@ -4,6 +4,10 @@ Description: PyQt6 GUI for Art Search.
 - Layout: Clean Div-based Hierarchy (Name -> Artist -> Medium -> Description).
 - Supports server-side pagination and spelling suggestion.
 - /test and /evaluate display output inside the GUI (colored).
+
+Packaging/performance:
+- ICON_PATH resolved relative to the executable directory when frozen (PyInstaller),
+  so the taskbar icon works when launched from Explorer.
 """
 
 from __future__ import annotations
@@ -32,7 +36,17 @@ from PyQt6.QtCore import QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import QDesktopServices, QIcon
 
 
-ICON_PATH = os.path.join(os.path.dirname(__file__), "icon.ico")
+def app_dir() -> str:
+    """
+    - Frozen exe: directory containing the exe
+    - Normal python: directory containing this .py file
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+ICON_PATH = os.path.join(app_dir(), "icon.ico")
 
 
 def _colorize_console_text_to_html(text: str) -> str:

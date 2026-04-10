@@ -1,20 +1,26 @@
 """
-File Name: evaluate_engine.py
-Description: Configurable evaluation suite for hybrid retrieval.
+evaluate_engine.py
 
-Why this version:
-- Result objects contain a synthetic Description, so semantic evaluation must
+Configurable evaluation suite for hybrid retrieval.
+
+Why this version
+----------------
+- GUI result objects contain a synthetic Description, so semantic evaluation must
   use the corpus text in engine.df (semantic_blob/search_* fields) keyed by doc id.
-- Configurable evaluation parameters via EvalConfig.
+- Evaluation is configurable via EvalConfig.
+- Supports a realistic "intent gating" engine by allowing semantic queries to
+  force dense retrieval (force_dense=True), while known-item queries can remain
+  sparse-only by default.
 
 Metrics
+-------
 Known-item:
 - MRR@K
 - Success@K (hit in top K)
 
 Semantic discovery (binary relevance derived from concepts OR titles):
 - NDCG@K (binary)
-- Precision@K  (P@K = sum(rel[:K]) / K)
+- Precision@K
 - MAP@K
 - Success@K
 
@@ -29,7 +35,7 @@ import contextlib
 import io
 import time
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal, Optional
 
 import numpy as np
 import pandas as pd
@@ -41,6 +47,8 @@ SemanticMode = Literal["concept", "titles"]
 
 @dataclass(frozen=True)
 class EvalConfig:
+    """Configuration for evaluation runs."""
+
     data_path: str = "art_gallery_data.csv"
     top_k: int = 10
     k_rrf: int = 60
@@ -51,7 +59,7 @@ class EvalConfig:
 
     # Semantic evaluation behavior
     semantic_mode: SemanticMode = "concept"
-    semantic_min_concept_hits: int = 1
+    semantic_min_concept_hits: int = 2
     semantic_min_hits_by_query: dict[str, int] | None = None
 
     # Which corpus fields to use for semantic relevance (must exist in CSV)
@@ -62,13 +70,19 @@ class EvalConfig:
         "semantic_blob",
     )
 
-    # Whether to print tables
+    # Dense forcing policy:
+    # - If True, semantic queries will call engine.hybrid_search(force_dense=True).
+    # - Known-item queries will still use force_dense=False (default) unless you
+    #   also set known_item_force_dense=True.
+    semantic_force_dense: bool = True
+    known_item_force_dense: bool = False
+
     verbose: bool = True
 
 
-# -----------------------------
-# Helpers: Engine result parsing
-# -----------------------------
+# ---------------------------------------------------------------------
+# Helpers: engine result parsing
+# ---------------------------------------------------------------------
 def unwrap_results(engine_response: Any) -> list[dict[str, Any]]:
     """
     Accept either:
@@ -86,6 +100,7 @@ def unwrap_results(engine_response: Any) -> list[dict[str, Any]]:
 
 
 def ensure_str(x: Any) -> str:
+    """Convert values to strings, mapping NaN -> empty."""
     if x is None:
         return ""
     s = str(x)
@@ -110,24 +125,41 @@ def build_id_to_text(df: pd.DataFrame, fields: Iterable[str]) -> dict[str, str]:
     return id_to_text
 
 
-def timed_search(engine: Any, query: str, top_k: int, k_rrf: int) -> tuple[Any, float]:
+def timed_search(
+    engine: Any,
+    query: str,
+    top_k: int,
+    k_rrf: int,
+    force_dense: bool = False,
+) -> tuple[Any, float]:
     """
-    Runs engine.hybrid_search and returns (response, elapsed_ms).
-    Works even if engine.hybrid_search doesn't accept k_rrf.
+    Run engine.hybrid_search and return (response, elapsed_ms).
+
+    Works even if engine.hybrid_search doesn't accept k_rrf (backward compatible).
     """
     start = time.perf_counter()
     try:
-        resp = engine.hybrid_search(query, top_k=top_k, k_rrf=k_rrf)
+        resp = engine.hybrid_search(
+            query,
+            top_k=top_k,
+            k_rrf=k_rrf,
+            force_dense=force_dense,
+        )
     except TypeError:
-        resp = engine.hybrid_search(query, top_k=top_k)
+        resp = engine.hybrid_search(
+            query,
+            top_k=top_k,
+            force_dense=force_dense,
+        )
     elapsed_ms = (time.perf_counter() - start) * 1000.0
     return resp, elapsed_ms
 
 
-# -----------------------------
+# ---------------------------------------------------------------------
 # Metrics
-# -----------------------------
+# ---------------------------------------------------------------------
 def calculate_mrr(ranked_ids: list[str], target_ids: set[str]) -> float:
+    """MRR for a single query."""
     for rank, doc_id in enumerate(ranked_ids):
         if doc_id in target_ids:
             return 1.0 / (rank + 1)
@@ -135,15 +167,18 @@ def calculate_mrr(ranked_ids: list[str], target_ids: set[str]) -> float:
 
 
 def success_at_k(ranked_ids: list[str], target_ids: set[str], k: int) -> float:
+    """Success@K for a single query."""
     return 1.0 if any(doc_id in target_ids for doc_id in ranked_ids[:k]) else 0.0
 
 
 def precision_at_k(rel: list[int], k: int) -> float:
+    """Precision@K for binary relevance."""
     rel_k = rel[:k]
     return float(sum(rel_k)) / float(k) if k > 0 else 0.0
 
 
 def average_precision_at_k(rel: list[int], k: int) -> float:
+    """Average Precision@K for binary relevance."""
     rel_k = rel[:k]
     hits = 0
     s = 0.0
@@ -155,6 +190,7 @@ def average_precision_at_k(rel: list[int], k: int) -> float:
 
 
 def ndcg_at_k_binary(rel: list[int], k: int) -> float:
+    """NDCG@K for binary relevance."""
     rel_k = rel[:k]
     dcg = 0.0
     for i, r in enumerate(rel_k):
@@ -170,15 +206,14 @@ def ndcg_at_k_binary(rel: list[int], k: int) -> float:
     return (dcg / idcg) if idcg > 0 else 0.0
 
 
-# -----------------------------
+# ---------------------------------------------------------------------
 # Ground truth mapping (Known-item)
-# -----------------------------
+# ---------------------------------------------------------------------
 def resolve_titles_to_ids(df: pd.DataFrame, target_query: str) -> set[str]:
     """
-    Resolve a target query to one or more document IDs.
-
-    - First try exact normalized title match (case-insensitive, hyphens → spaces).
-    - If none found, fall back to substring match.
+    Resolve target titles to IDs using:
+    1) exact normalized title match
+    2) fallback substring match
     """
     normalized_query = target_query.lower().replace("-", " ").strip()
 
@@ -191,28 +226,27 @@ def resolve_titles_to_ids(df: pd.DataFrame, target_query: str) -> set[str]:
         .str.strip()
     )
 
-    # 1) Exact match
     exact_mask = titles == normalized_query
     exact_ids = df.loc[exact_mask, "id"].astype(str).tolist()
     if exact_ids:
-        return set(ensure_str(i) for i in exact_ids)
+        return {ensure_str(i) for i in exact_ids}
 
-    # 2) Fallback: substring
     contains_mask = titles.str.contains(normalized_query, na=False, regex=False)
-    return set(
+    return {
         ensure_str(i) for i in df.loc[contains_mask, "id"].astype(str).unique().tolist()
-    )
+    }
 
 
-# -----------------------------
+# ---------------------------------------------------------------------
 # Semantic relevance builders
-# -----------------------------
+# ---------------------------------------------------------------------
 def relevance_from_concepts_by_id(
     ranked_ids: list[str],
     id_to_text: dict[str, str],
     concepts: list[str],
     min_hits: int,
 ) -> list[int]:
+    """Binary relevance: relevant iff >= min_hits concept tokens appear in blob."""
     concepts_l = [c.lower() for c in concepts]
     rel: list[int] = []
     for doc_id in ranked_ids:
@@ -225,13 +259,15 @@ def relevance_from_concepts_by_id(
 def relevance_from_titles_by_id(
     ranked_ids: list[str], relevant_ids: set[str]
 ) -> list[int]:
+    """Binary relevance by an explicit relevant-id set."""
     return [1 if doc_id in relevant_ids else 0 for doc_id in ranked_ids]
 
 
-# -----------------------------
+# ---------------------------------------------------------------------
 # Reporting
-# -----------------------------
+# ---------------------------------------------------------------------
 def print_table(rows: list[list[Any]], headers: list[str]) -> None:
+    """Lightweight ASCII table printer."""
     str_rows = [[str(c) for c in r] for r in rows]
     str_headers = [str(h) for h in headers]
 
@@ -256,10 +292,10 @@ def _print_metric(label: str, value: str, width: int = 34) -> None:
     print(f"{label:<{width}} {value}")
 
 
-# -----------------------------
+# ---------------------------------------------------------------------
 # Main evaluation
-# -----------------------------
-def run_evaluation(config: EvalConfig | None = None) -> None:
+# ---------------------------------------------------------------------
+def run_evaluation(config: Optional[EvalConfig] = None) -> None:
     config = config or EvalConfig()
 
     print("═" * 70)
@@ -267,16 +303,16 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
     print("═" * 70)
     print(
         f"[CONFIG] top_k={config.top_k} | k_rrf={config.k_rrf} | "
-        f"semantic_mode={config.semantic_mode} | min_hits={config.semantic_min_concept_hits}"
+        f"semantic_mode={config.semantic_mode} | min_hits={config.semantic_min_concept_hits} | "
+        f"semantic_force_dense={config.semantic_force_dense}"
     )
 
     engine = ArtGallerySearchEngine(config.data_path)
     id_to_text = build_id_to_text(engine.df, config.semantic_text_fields)
 
-    # Warm up (model/index warm-up)
-    _ = timed_search(engine, "warmup", top_k=1, k_rrf=config.k_rrf)
+    # Warm up (does not force dense by default; cheap)
+    _ = timed_search(engine, "warmup", top_k=1, k_rrf=config.k_rrf, force_dense=False)
 
-    # Expanded known-item set
     known_items = [
         "a steamer off the coast",
         "river scene",
@@ -287,7 +323,6 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
         "st dunstan-in-the-east",
     ]
 
-    # Expanded semantic concept set
     semantic_concepts = {
         "mountain scenery": [
             "mountain",
@@ -353,17 +388,14 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
         ],
     }
 
-    semantic_title_qrels: dict[str, list[str]] = {}  # optional (unused here)
+    semantic_title_qrels: dict[str, list[str]] = {}
 
-    # Aggregates (cold + warm)
     cold_latencies_ms: list[float] = []
     warm_latencies_ms: list[float] = []
 
-    # Known-item aggregates
     mrr_scores: list[float] = []
     s_at_k_known: list[float] = []
 
-    # Semantic aggregates
     ndcg_scores: list[float] = []
     p_at_k_scores: list[float] = []
     map_at_k_scores: list[float] = []
@@ -376,14 +408,23 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
     print("\nPhase 1: Known-Item Retrieval")
     for query in known_items:
         target_ids = resolve_titles_to_ids(engine.df, query)
-        # Slight variation for user query to simulate natural input
+
+        # Small variation to simulate a real user query
         user_query = query.replace("-", " ").replace(" on rock", " on a rock")
 
         resp_cold, cold_ms = timed_search(
-            engine, user_query, config.top_k, config.k_rrf
+            engine,
+            user_query,
+            config.top_k,
+            config.k_rrf,
+            force_dense=config.known_item_force_dense,
         )
         resp_warm, warm_ms = timed_search(
-            engine, user_query, config.top_k, config.k_rrf
+            engine,
+            user_query,
+            config.top_k,
+            config.k_rrf,
+            force_dense=config.known_item_force_dense,
         )
 
         cold_latencies_ms.append(cold_ms)
@@ -429,8 +470,20 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
     # ------------------------- Phase 2: Semantic
     print("\nPhase 2: Semantic Discovery")
     for query, concepts in semantic_concepts.items():
-        resp_cold, cold_ms = timed_search(engine, query, config.top_k, config.k_rrf)
-        resp_warm, warm_ms = timed_search(engine, query, config.top_k, config.k_rrf)
+        resp_cold, cold_ms = timed_search(
+            engine,
+            query,
+            config.top_k,
+            config.k_rrf,
+            force_dense=config.semantic_force_dense,
+        )
+        resp_warm, warm_ms = timed_search(
+            engine,
+            query,
+            config.top_k,
+            config.k_rrf,
+            force_dense=config.semantic_force_dense,
+        )
 
         cold_latencies_ms.append(cold_ms)
         warm_latencies_ms.append(warm_ms)
@@ -438,7 +491,6 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
         results = unwrap_results(resp_warm)
         ranked_ids = [ensure_str(r.get("id", "")) for r in results if "id" in r]
 
-        # allow per-query override of min_hits
         min_hits = config.semantic_min_concept_hits
         if (
             config.semantic_min_hits_by_query
@@ -456,19 +508,18 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
         else:
             titles = semantic_title_qrels.get(query, [])
             relevant_ids: set[str] = set()
-            if titles:
-                for t in titles:
-                    relevant_ids |= resolve_titles_to_ids(engine.df, t)
+            for t in titles:
+                relevant_ids |= resolve_titles_to_ids(engine.df, t)
             rel = relevance_from_titles_by_id(ranked_ids, relevant_ids)
 
         ndcg = ndcg_at_k_binary(rel, config.top_k)
         p_at_k = precision_at_k(rel, config.top_k)
-        map_at_k = average_precision_at_k(rel, config.top_k)
+        map_k = average_precision_at_k(rel, config.top_k)
         succ = 1.0 if any(rel[: config.top_k]) else 0.0
 
         ndcg_scores.append(ndcg)
         p_at_k_scores.append(p_at_k)
-        map_at_k_scores.append(map_at_k)
+        map_at_k_scores.append(map_k)
         s_at_k_sem.append(succ)
 
         status = "PASS" if ndcg >= config.pass_ndcg_threshold else "FAIL"
@@ -478,7 +529,7 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
                 f"{min_hits}",
                 f"{ndcg:.4f}",
                 f"{p_at_k:.4f}",
-                f"{map_at_k:.4f}",
+                f"{map_k:.4f}",
                 f"{succ:.0f}",
                 f"{cold_ms:.2f}ms",
                 f"{warm_ms:.2f}ms",
@@ -529,16 +580,14 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
 
 def run_evaluation_to_text(*args, **kwargs) -> str:
     """
-    GUI helper: captures run_evaluation() stdout/stderr and returns it as text.
+    GUI helper: capture run_evaluation() output and return as text.
 
     Usage patterns:
-      run_evaluation_to_text()  -> uses defaults
+      run_evaluation_to_text()  -> defaults
       run_evaluation_to_text(config=EvalConfig(...))
       run_evaluation_to_text(top_k=20, k_rrf=80, ...)  -> convenience overrides
     """
     config = kwargs.pop("config", None)
-
-    # Convenience: allow overrides without requiring caller to build EvalConfig
     if config is None and kwargs:
         config = EvalConfig(**kwargs)
 
@@ -549,16 +598,19 @@ def run_evaluation_to_text(*args, **kwargs) -> str:
 
 
 if __name__ == "__main__":
+    # CLI usage remains supported
     run_evaluation(
         EvalConfig(
             top_k=10,
             k_rrf=60,
             semantic_mode="concept",
             semantic_min_concept_hits=2,
+            semantic_force_dense=True,
+            known_item_force_dense=False,
             semantic_min_hits_by_query={
-                "mountain scenery": 2,
+                "mountain scenery": 1,
                 "ocean and boats": 2,
-                "atmospheric studies": 3,
+                "atmospheric studies": 2,
                 "urban night lights": 2,
                 "industrial landscape": 2,
             },

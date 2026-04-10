@@ -3,13 +3,23 @@ File Name: main.py
 Description: Unified entry/router for the Tate Gallery AI Search System.
 - Launches: PyQt GUI (default), CLI (--cli), test suite (--test), or IR eval.
 - Handles OS signals for clean exits.
-- Satisfies Pylance diagnostics for function exports.
+
+Packaging/performance:
+- Resolve icon path relative to executable directory when frozen (taskbar icon).
 """
+
+from __future__ import annotations
 
 import os
 import sys
 import argparse
 import unittest
+
+
+def app_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 # Make sure stdout/stderr always have isatty(), even in a PyInstaller windowed exe.
@@ -26,32 +36,32 @@ class _SafeStream:
             return self._backing.flush()
 
     def isatty(self):
-        # In a GUI exe, pretend it's not a TTY
         return False
 
     def __getattr__(self, name):
-        # Delegate all other attributes to the real stream if present
         if self._backing is not None:
             return getattr(self._backing, name)
         raise AttributeError(name)
 
 
-# Wrap stdout/stderr once for the GUI exe; harmless in normal Python runs.
 sys.stdout = _SafeStream(getattr(sys, "stdout", None))
 sys.stderr = _SafeStream(getattr(sys, "stderr", None))
 
-# Silence HF/transformers progress bars and logs as additional safety
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-ICON_PATH = os.path.join(os.path.dirname(__file__), "icon.ico")
+ICON_PATH = os.path.join(app_dir(), "icon.ico")
 
+try:
+    import ctypes
+
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("tate.search.engine")
+except Exception:
+    pass
 
 def launch_tests():
-    """Run all automatic regression/unit/logic tests."""
-    # pylint: disable=import-outside-toplevel
     import test_engine
 
     print("\n" + "=" * 60)
@@ -62,26 +72,22 @@ def launch_tests():
 
 
 def launch_evaluation():
-    """Runs strict IR evaluation on MRR and NDCG@10 metrics."""
-    # pylint: disable=import-outside-toplevel
     from evaluate_engine import EvalConfig, run_evaluation
-    from ingest_data import OUTPUT_FILE
+    import ingest_data
 
-    run_evaluation(config=EvalConfig(data_path=OUTPUT_FILE))
+    run_evaluation(config=EvalConfig(data_path=ingest_data.OUTPUT_FILE))
 
 
 def launch_cli():
-    """Synchronous command-line interface with strict command handling."""
-    # pylint: disable=import-outside-toplevel
     from hybrid_search import ArtGallerySearchEngine
-    from ingest_data import OUTPUT_FILE
+    import ingest_data
 
     print("\n" + "=" * 60)
     print("TATE GALLERY SEARCH | CLI MODE")
     print("=" * 60)
 
     try:
-        engine = ArtGallerySearchEngine(OUTPUT_FILE)
+        engine = ArtGallerySearchEngine(ingest_data.OUTPUT_FILE)
         print("\nReady! Commands: '/exit', '/test', '/evaluate', '/help'")
         print("-" * 60)
         while True:
@@ -90,7 +96,6 @@ def launch_cli():
                 if not query:
                     continue
 
-                # Strict Slash Command Handling
                 if query.startswith("/"):
                     cmd = query.lower()
                     if cmd in ["/exit", "/quit"]:
@@ -109,7 +114,6 @@ def launch_cli():
                     print(f"[ERROR] Unknown command: {query}")
                     continue
 
-                # Standard Search (if no slash)
                 response = engine.hybrid_search(query, top_k=5, page=1, per_page=5)
                 results = response.get("results", [])
                 if not results:
@@ -128,21 +132,18 @@ def launch_cli():
                     print("-" * 20)
             except KeyboardInterrupt:
                 break
-    except Exception as e:  # pylint: disable=broad-exception-caught
+    except Exception as e:
         print(f"[CRITICAL] CLI Error: {e}")
         sys.exit(1)
 
 
 def launch_gui():
-    """Launches the PyQt GUI with robust signal handling."""
     import signal
 
-    # pylint: disable=no-name-in-module,import-outside-toplevel
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtCore import QTimer
     from PyQt6.QtGui import QIcon
 
-    # pylint: disable=import-outside-toplevel
     from gui import ArtSearchGUI
 
     signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -159,7 +160,6 @@ def launch_gui():
 
 
 if __name__ == "__main__":
-    # pylint: disable=import-outside-toplevel
     from ingest_data import ensure_data_exists
 
     parser = argparse.ArgumentParser(description="Tate Gallery AI Search Engine")
