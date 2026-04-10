@@ -3,7 +3,7 @@ File Name: evaluate_engine.py
 Description: Configurable evaluation suite for hybrid retrieval.
 
 Why this version:
-- Your result objects contain a synthetic Description, so semantic evaluation must
+- Result objects contain a synthetic Description, so semantic evaluation must
   use the corpus text in engine.df (semantic_blob/search_* fields) keyed by doc id.
 - Configurable evaluation parameters via EvalConfig.
 
@@ -174,16 +174,34 @@ def ndcg_at_k_binary(rel: list[int], k: int) -> float:
 # Ground truth mapping (Known-item)
 # -----------------------------
 def resolve_titles_to_ids(df: pd.DataFrame, target_query: str) -> set[str]:
-    normalized_query = target_query.lower().replace("-", " ")
+    """
+    Resolve a target query to one or more document IDs.
+
+    - First try exact normalized title match (case-insensitive, hyphens → spaces).
+    - If none found, fall back to substring match.
+    """
+    normalized_query = target_query.lower().replace("-", " ").strip()
+
     titles = (
         df["title"]
         .fillna("")
         .astype(str)
         .str.lower()
         .str.replace("-", " ", regex=False)
+        .str.strip()
     )
-    mask = titles.str.contains(normalized_query, na=False, regex=False)
-    return set(ensure_str(i) for i in df.loc[mask, "id"].astype(str).unique().tolist())
+
+    # 1) Exact match
+    exact_mask = titles == normalized_query
+    exact_ids = df.loc[exact_mask, "id"].astype(str).tolist()
+    if exact_ids:
+        return set(ensure_str(i) for i in exact_ids)
+
+    # 2) Fallback: substring
+    contains_mask = titles.str.contains(normalized_query, na=False, regex=False)
+    return set(
+        ensure_str(i) for i in df.loc[contains_mask, "id"].astype(str).unique().tolist()
+    )
 
 
 # -----------------------------
@@ -258,13 +276,18 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
     # Warm up (model/index warm-up)
     _ = timed_search(engine, "warmup", top_k=1, k_rrf=config.k_rrf)
 
+    # Expanded known-item set
     known_items = [
         "a steamer off the coast",
         "river scene",
         "self-portrait",
         "castle on rock",
+        "the old gate",
+        "margate",
+        "st dunstan-in-the-east",
     ]
 
+    # Expanded semantic concept set
     semantic_concepts = {
         "mountain scenery": [
             "mountain",
@@ -304,9 +327,33 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
             "light",
             "atmosphere",
         ],
+        "urban night lights": [
+            "night",
+            "nocturne",
+            "city",
+            "street",
+            "lamp",
+            "lights",
+            "neon",
+            "evening",
+            "dark",
+            "rain",
+        ],
+        "industrial landscape": [
+            "factory",
+            "mill",
+            "smoke",
+            "chimney",
+            "industrial",
+            "railway",
+            "bridge",
+            "dock",
+            "warehouse",
+            "crane",
+        ],
     }
 
-    semantic_title_qrels: dict[str, list[str]] = {}  # optional
+    semantic_title_qrels: dict[str, list[str]] = {}  # optional (unused here)
 
     # Aggregates (cold + warm)
     cold_latencies_ms: list[float] = []
@@ -325,12 +372,13 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
     rows_mrr: list[list[Any]] = []
     rows_sem: list[list[Any]] = []
 
+    # ------------------------- Phase 1: Known-item
     print("\nPhase 1: Known-Item Retrieval")
     for query in known_items:
         target_ids = resolve_titles_to_ids(engine.df, query)
+        # Slight variation for user query to simulate natural input
         user_query = query.replace("-", " ").replace(" on rock", " on a rock")
 
-        # cold + warm runs
         resp_cold, cold_ms = timed_search(
             engine, user_query, config.top_k, config.k_rrf
         )
@@ -378,6 +426,7 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
         ],
     )
 
+    # ------------------------- Phase 2: Semantic
     print("\nPhase 2: Semantic Discovery")
     for query, concepts in semantic_concepts.items():
         resp_cold, cold_ms = timed_search(engine, query, config.top_k, config.k_rrf)
@@ -452,6 +501,7 @@ def run_evaluation(config: EvalConfig | None = None) -> None:
         ],
     )
 
+    # ------------------------- Final summary
     print("\nFINAL SYSTEM PERFORMANCE REPORT")
     print("=" * 60)
     if mrr_scores:
@@ -499,13 +549,18 @@ def run_evaluation_to_text(*args, **kwargs) -> str:
 
 
 if __name__ == "__main__":
-    # CLI usage remains supported
     run_evaluation(
         EvalConfig(
             top_k=10,
             k_rrf=60,
             semantic_mode="concept",
             semantic_min_concept_hits=2,
-            semantic_min_hits_by_query={"mountain scenery": 1},
+            semantic_min_hits_by_query={
+                "mountain scenery": 2,
+                "ocean and boats": 2,
+                "atmospheric studies": 3,
+                "urban night lights": 2,
+                "industrial landscape": 2,
+            },
         )
     )

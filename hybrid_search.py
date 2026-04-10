@@ -112,7 +112,7 @@ class ArtGallerySearchEngine:
         print(f"[INFO] Initializing dense retriever on {self.device.upper()}...")
         self.dense_model = SentenceTransformer(DENSE_MODEL_ID, device=self.device)
 
-        # NEW: use chunked dense index instead of doc-level embeddings.npy
+        # use chunked dense index instead of doc-level embeddings.npy
         self._load_or_build_chunk_index()
 
         print("[INFO] Building Spelling Vocabulary...")
@@ -289,7 +289,7 @@ class ArtGallerySearchEngine:
         return {
             int(idx): rank
             for rank, idx in enumerate(top_indices)
-            if doc_scores[idx] > 0.25
+            if doc_scores[idx] > 0.3  # slightly stricter threshold
         }
 
     @staticmethod
@@ -336,12 +336,15 @@ class ArtGallerySearchEngine:
         canonical_artist = self.primary_artist_for_surname.get(lastname)
 
         # Multipliers and penalties to align math with human intent
-        canonical_boost = 15.0
-        true_artist_boost = 5.0
-        tier1_medium_boost = 5.0
-        tier2_medium_boost = 1.5
-        depiction_penalty = 0.01
-        subject_only_penalty = 0.1
+        canonical_boost = 3.0       # canonical surname artist for single-word queries
+        true_artist_boost = 1.5     # Reward exact artist match
+        exact_title_boost = 3.0     # exact title match
+        all_words_title_boost = 2.0 # all query words in title (multi-word)
+        strong_title_boost = 1.5    # >= half of query words in title
+        tier1_medium_boost = 1.1    # small tie-breaker
+        tier2_medium_boost = 1.05
+        depiction_penalty = 0.1     # not complete kill
+        subject_only_penalty = 0.5  # halve score, don’t nuke
 
         depiction_phrases = ["statue of", "portrait of", "bust of", "head of", "after"]
         tier1_media = ["oil", "canvas", "sculpture", "marble", "acrylic", "watercolour"]
@@ -375,11 +378,37 @@ class ArtGallerySearchEngine:
                 and self._is_canonical_artist(artist_raw, canonical_artist)
             )
 
+            # Title matching strength
+            norm_query = query_lower.strip()
+            norm_title = title_lower.strip()
+
+            # All query words appear in the title (order not required), only for 3+ word queries
+            all_words_in_title = len(query_words) >= 3 and all(
+                w in norm_title for w in query_words
+            )
+
+            exact_title_match = norm_query == norm_title
+            strong_title_overlap = (
+                not exact_title_match
+                and not all_words_in_title
+                and len(query_words) > 0
+                and sum(1 for w in query_words if w in norm_title)
+                >= max(1, len(query_words) // 2)
+            )
+
             # Apply Logic Multipliers
             if is_canonical:
                 multiplier *= canonical_boost
             elif is_true_artist:
                 multiplier *= true_artist_boost
+
+            # Title-based boosts for known-item behaviour
+            if exact_title_match:
+                multiplier *= exact_title_boost
+            elif all_words_in_title:
+                multiplier *= all_words_title_boost
+            elif strong_title_overlap:
+                multiplier *= strong_title_boost
 
             if any(m in medium_lower for m in tier1_media):
                 multiplier *= tier1_medium_boost
@@ -389,7 +418,14 @@ class ArtGallerySearchEngine:
             if is_depiction and not user_wants_depiction:
                 multiplier *= depiction_penalty
 
-            if title_mentions_query and not is_true_artist:
+            # Only penalise "subject-only" when NOT a strong title match
+            if (
+                title_mentions_query
+                and not is_true_artist
+                and not exact_title_match
+                and not all_words_in_title
+                and not strong_title_overlap
+            ):
                 multiplier *= subject_only_penalty
 
             fused_scores[idx] = base_score * multiplier
