@@ -9,21 +9,42 @@ Description: Unified entry/router for the Tate Gallery AI Search System.
 import os
 import sys
 import argparse
-import signal
 import unittest
 
-# pylint: disable=no-name-in-module
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QTimer
-from PyQt6.QtGui import QIcon
 
-# Local project imports
-from ingest_data import ensure_data_exists, OUTPUT_FILE
-from hybrid_search import ArtGallerySearchEngine
-from gui import ArtSearchGUI
+# Make sure stdout/stderr always have isatty(), even in a PyInstaller windowed exe.
+class _SafeStream:
+    def __init__(self, backing):
+        self._backing = backing
 
-# Suppress TensorFlow/transformer logging before model load
+    def write(self, data):
+        if self._backing is not None:
+            return self._backing.write(data)
+
+    def flush(self):
+        if self._backing is not None and hasattr(self._backing, "flush"):
+            return self._backing.flush()
+
+    def isatty(self):
+        # In a GUI exe, pretend it's not a TTY
+        return False
+
+    def __getattr__(self, name):
+        # Delegate all other attributes to the real stream if present
+        if self._backing is not None:
+            return getattr(self._backing, name)
+        raise AttributeError(name)
+
+
+# Wrap stdout/stderr once for the GUI exe; harmless in normal Python runs.
+sys.stdout = _SafeStream(getattr(sys, "stdout", None))
+sys.stderr = _SafeStream(getattr(sys, "stderr", None))
+
+# Silence HF/transformers progress bars and logs as additional safety
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "icon.ico")
 
@@ -44,12 +65,17 @@ def launch_evaluation():
     """Runs strict IR evaluation on MRR and NDCG@10 metrics."""
     # pylint: disable=import-outside-toplevel
     from evaluate_engine import EvalConfig, run_evaluation
+    from ingest_data import OUTPUT_FILE
 
     run_evaluation(config=EvalConfig(data_path=OUTPUT_FILE))
 
 
 def launch_cli():
     """Synchronous command-line interface with strict command handling."""
+    # pylint: disable=import-outside-toplevel
+    from hybrid_search import ArtGallerySearchEngine
+    from ingest_data import OUTPUT_FILE
+
     print("\n" + "=" * 60)
     print("TATE GALLERY SEARCH | CLI MODE")
     print("=" * 60)
@@ -109,6 +135,16 @@ def launch_cli():
 
 def launch_gui():
     """Launches the PyQt GUI with robust signal handling."""
+    import signal
+
+    # pylint: disable=no-name-in-module,import-outside-toplevel
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtGui import QIcon
+
+    # pylint: disable=import-outside-toplevel
+    from gui import ArtSearchGUI
+
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(ICON_PATH))
@@ -123,6 +159,9 @@ def launch_gui():
 
 
 if __name__ == "__main__":
+    # pylint: disable=import-outside-toplevel
+    from ingest_data import ensure_data_exists
+
     parser = argparse.ArgumentParser(description="Tate Gallery AI Search Engine")
     parser.add_argument("--cli", action="store_true", help="Start CLI")
     parser.add_argument("--test", action="store_true", help="Run tests")

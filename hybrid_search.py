@@ -180,7 +180,7 @@ class ArtGallerySearchEngine:
         self.chunk_embeddings = self.dense_model.encode(
             all_chunks,
             batch_size=128,
-            show_progress_bar=True,
+            show_progress_bar=False,
             convert_to_numpy=True,
             normalize_embeddings=True,
         ).astype(np.float32)
